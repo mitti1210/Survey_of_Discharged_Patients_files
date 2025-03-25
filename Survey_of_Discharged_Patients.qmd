@@ -1,0 +1,920 @@
+---
+title: "Survey of Discharged Patients"
+author: "MITTI"
+format:
+  dashboard:
+    theme: default
+    expandable: true
+    scrolling: true
+server: shiny
+execute:
+  echo: false
+  warning: false
+  message: false
+  eval: true
+resource_files:
+- manifest.json
+---
+
+```{r}
+#| context: setup
+library(shiny)
+library(data.table)
+library(tidyverse)
+library(tidylog)
+library(DT)
+library(gghighlight)
+library(scales)
+library(ggrepel)
+library(patchwork)
+library(quarto)
+library(here)
+# プロジェクトディレクトリを設定
+
+options(shiny.maxRequestSize = 20 * 1024^2)
+
+hospital_overview_long <- readRDS(here("rds", "hospital_overview_long.rds"))
+setDT(hospital_overview_long)
+
+disease_list <- readRDS(here("rds", "disease_list.rds"))
+
+min_year <- min(hospital_overview_long$年度, na.rm = TRUE)
+max_year <- max(hospital_overview_long$年度, na.rm = TRUE)  
+
+prefectures <- readRDS(here("rds", "prefectures.rds"))
+municipalities <- readRDS(here("rds", "municipalities.rds"))
+hospitals <- readRDS(here("rds", "hospitals.rds"))
+hospitals_municipalities <- readRDS(here("rds", "hospitals_municipalities.rds"))
+
+# Load RDS files
+rds_files <- list.files(path = here("data", "rds"), pattern = "\\.rds$", full.names = TRUE)
+
+# Read all RDS files into a list and convert to data.tables
+data_list <- lapply(rds_files, function(x) {
+  dt <- setDT(readRDS(x))
+  name <- gsub("\\.rds$", "", basename(x))  # Extract filename without extension
+  return(dt)
+})
+names(data_list) <- gsub("\\.rds$", "", basename(rds_files)) # Assign names to list elements
+```
+
+#  {.sidebar}
+
+```{r}
+selectInput("prefecture", "都道府県", choices = prefectures, multiple = FALSE, selectize = TRUE)
+
+uiOutput("municipality_selector")
+
+uiOutput("hospital_main_selector")
+
+uiOutput("hospital_comparison_selector")
+```
+
+以下はMDC分析で使用
+
+```{r}
+sliderInput("year_selector", "年度", min = 2012, max = as.integer(max_year), value = as.integer(max_year), step = 1)
+
+selectInput("operation_selector", "手術の有無", 
+            choices = c("手術あり", "手術なし", "合計"),
+            selected = "合計")
+
+selectInput("mdc_selector", "MDC", 
+            choices = c("MDC01", "MDC02", "MDC03", "MDC04", "MDC05", "MDC06", "MDC07", "MDC08", "MDC09", "MDC10", "MDC11", "MDC12", "MDC13", "MDC14", "MDC15", "MDC16", "MDC17", "MDC18"),
+            selected = "MDC01")
+
+uiOutput("disease_selector")
+
+```
+
+::: {.callout-note collapse="true"}
+このサイトは厚生労働省の「DPC導入の影響評価に係る調査「退院患者調査」の結果報告」をもとに作成されています。
+
+このプロジェクトは\[公益社団法人 日本医業経営コンサルタント協会　令和6年度　情報活用コンペティション\]に応募するために作成されました。 コンペティション期間中は、作品のライセンスに関しては特に明言しておらず、すべての権利は作者に帰属します。
+
+予告なく公開を終了することがあります。
+:::
+
+```{r}
+#| context: server
+output$municipality_selector <- renderUI({
+  select_prefecture <- input$prefecture
+  municipalities_for_prefecture <- municipalities[[select_prefecture]]
+  selectInput("dynamicMunicipality", "市区町村", choices = municipalities_for_prefecture, multiple = FALSE, selectize = TRUE)
+})
+
+output$hospital_main_selector <- renderUI({
+  select_municipality <- input$dynamicMunicipality
+  if (is.null(select_municipality) || !select_municipality %in% names(hospitals_municipalities)) {
+    return(selectInput("dynamicHospital_main", "主病院", choices = NULL))
+  }
+  hospitals_for_municipality <- hospitals_municipalities[[select_municipality]]
+  if (is.null(hospitals_for_municipality) || length(hospitals_for_municipality) == 0) {
+    return(selectInput("dynamicHospital_main", "主病院", choices = NULL))
+  }
+  selectInput("dynamicHospital_main", "主病院", choices = hospitals_for_municipality, multiple = FALSE, selectize = TRUE)
+})
+
+output$hospital_comparison_selector <- renderUI({
+  select_prefecture <- input$prefecture
+  hospitals_for_prefecture <- hospitals[[select_prefecture]]
+  selectInput("dynamicHospital_comparison", "比較病院", choices = hospitals_for_prefecture, multiple = TRUE, selectize = TRUE)
+})
+
+
+output$disease_selector <- renderUI({
+  mdc_selected <- input$mdc_selector
+  disease_list_selected <- filter(disease_list, MDC_main == mdc_selected)
+  selectInput("dynamicDisease", "病名", choices = disease_list_selected$label, multiple = FALSE)
+})
+
+
+# Create a reactive expression for filtered data_list
+data_list_filtered <- reactive({
+  lapply(data_list, function(dt) {
+    if ("都道府県名" %in% names(dt)) {
+      dt <- dt[都道府県名 == input$prefecture]
+    }
+    return(dt)
+  })
+})
+
+output$main_hospital_text <- renderText({
+  input$dynamicHospital_main
+})
+
+output$prefecture_text <- renderText({
+  input$prefecture
+})
+
+output$municipality_text <- renderText({
+  input$dynamicMunicipality
+})
+
+output$comparison_hospital_text <- renderText({
+  input$dynamicHospital_comparison
+})
+
+output$download_plot_all <- downloadHandler(
+  filename = function() {
+    paste0("hospital_report_", input$dynamicHospital_main, "_", Sys.Date(), ".html")
+  },
+  content = function(file) {
+    # 一時ディレクトリを作成
+    temp_dir <- tempdir()
+    
+    # 現在の作業ディレクトリを記録
+    orig_wd <- getwd()
+    
+    # 一時ディレクトリ内の一時ファイル
+    temp_report <- file.path(temp_dir, "temp_report.qmd")
+    temp_output <- file.path(temp_dir, "temp_report.html")
+    
+    # データの構造を確認
+    if (!exists("data_list") || is.null(data_list)) {
+      stop("データが正しく読み込まれていません")
+    }
+    
+    # 必要なカラムが存在することを確認
+    required_columns <- c("年度", "施設名_最新")
+    for (dt_name in names(data_list)) {
+      dt <- data_list[[dt_name]]
+      if (!all(required_columns %in% names(dt))) {
+        warning(sprintf("データテーブル %s に必要なカラムが存在しません", dt_name))
+      }
+    }
+    
+    # パラメータの設定
+    params_list <- list(
+      prefecture = input$prefecture,
+      municipality = input$dynamicMunicipality,
+      hospital_main = input$dynamicHospital_main,
+      year = as.integer(max_year),
+      operation = "合計"
+    )
+    
+    # 操作タイプのパラメータを設定
+    if (!is.null(input$operation_selector)) {
+      params_list$operation <- input$operation_selector
+    }
+    
+    # 年度パラメータを設定
+    if (!is.null(input$year_slider_data1_14)) {
+      params_list$year <- input$year_slider_data1_14
+    } else if (!is.null(input$year_selector)) {
+      params_list$year <- input$year_selector
+    }
+    
+    # YAMLヘッダーの作成
+    yaml_header <- c(
+      "---",
+      "title: \"Hospital Analysis Report\"",
+      "author: \"MITTI\"",
+      "format:",
+      "  html:",
+      "    toc: true",
+      "    toc-depth: 3",
+      "    number-sections: true",
+      "    embed-resources: true",
+      "    theme: default",
+      "params:"
+    )
+    
+    # パラメータYAML部分の作成
+    params_yaml <- c(
+      paste0("  prefecture: \"", params_list$prefecture, "\""),
+      paste0("  municipality: \"", params_list$municipality, "\""),
+      paste0("  hospital_main: \"", params_list$hospital_main, "\"")
+    )
+    
+ 
+    
+    # 残りのパラメータの追加
+    params_yaml <- c(params_yaml,
+                    paste0("  year: ", params_list$year),
+                    paste0("  operation: \"", params_list$operation, "\""))
+    
+    # 完全なYAMLヘッダー
+    full_yaml <- c(yaml_header, params_yaml, "---")
+    
+    # hospital_report.qmdの内容を読み込む
+    report_content <- readLines(here("hospital_report.qmd"))
+    
+    # YAMLヘッダー部分を見つける
+    yaml_end_idx <- which(report_content == "---")[2]
+    
+    if (length(yaml_end_idx) > 0 && !is.na(yaml_end_idx)) {
+      # YAMLヘッダーを新しいものに置き換え
+      modified_content <- c(
+        full_yaml,
+        report_content[(yaml_end_idx+1):length(report_content)]
+      )
+    } else {
+      # YAMLセクションが見つからない場合は、そのまま使用
+      modified_content <- c(
+        full_yaml,
+        report_content
+      )
+    }
+    
+    # 最後の行に改行を追加して完全なファイルにする
+    modified_content <- c(modified_content, "")
+    
+    # 一時ファイルに書き込む
+    writeLines(modified_content, temp_report)
+    
+    # コピーする必要のあるファイル - here::hereの挙動を一時ディレクトリでも正しく機能させるため
+    dir.create(file.path(temp_dir, "rds"), showWarnings = FALSE, recursive = TRUE)
+    dir.create(file.path(temp_dir, "data", "rds"), showWarnings = FALSE, recursive = TRUE)
+    
+    # .hereファイルを作成して一時ディレクトリをプロジェクトルートとして認識させる
+    file.create(file.path(temp_dir, ".here"))
+    
+    # 必要なRDSファイルをコピー
+    file.copy(
+      from = list.files(here("rds"), full.names = TRUE), 
+      to = file.path(temp_dir, "rds"), 
+      recursive = TRUE
+    )
+    
+    file.copy(
+      from = list.files(here("data", "rds"), full.names = TRUE), 
+      to = file.path(temp_dir, "data", "rds"), 
+      recursive = TRUE
+    )
+    
+    # 進行状況を通知
+    showNotification("レポートをレンダリング中です。しばらくお待ちください...", type = "message", duration = NULL, id = "render_notif")
+    
+    # 作業ディレクトリを一時ディレクトリに変更
+    setwd(temp_dir)
+    
+    # レポートをレンダリング
+    tryCatch({
+      # HTMLとして出力するように指定
+      system2("quarto", args = c("render", "temp_report.qmd", "--to", "html", "--output", "temp_report.html"))
+      
+      # レンダリング成功したらファイルをコピー
+      if (file.exists(temp_output)) {
+        file.copy(temp_output, file, overwrite = TRUE)
+        removeNotification("render_notif")
+        showNotification("レポートが完成しました！", type = "message", duration = 5)
+      } else {
+        removeNotification("render_notif")
+        showNotification("レポートの生成に失敗しました。", type = "error", duration = 10)
+      }
+    }, error = function(e) {
+      removeNotification("render_notif")
+      showNotification(paste("エラーが発生しました:", e$message), type = "error", duration = 10)
+    }, finally = {
+      # 元の作業ディレクトリに戻る
+      setwd(orig_wd)
+    })
+  }
+)
+
+
+
+
+output$plot_data1_3 <- renderPlot({
+  req(input$dynamicHospital_main)
+
+  selected_hospital_main <- input$dynamicHospital_main
+  selected_hospital_comparison <- input$dynamicHospital_comparison
+
+  plot_data <- data_list_filtered()[["data1_3"]]
+  plot_data$施設名_最新 <- fct_relevel(plot_data$施設名_最新, selected_hospital_main)
+
+  if(is.null(plot_data)) return(NULL)
+
+  highlight_hospitals <- selected_hospital_main
+  if (!is.null(selected_hospital_comparison) && length(selected_hospital_comparison) > 0) {
+    highlight_hospitals <- c(selected_hospital_main, selected_hospital_comparison)
+  }
+
+  plot_data |>
+    ggplot(aes(x = 年度, y = 平均値, group = 施設名_最新, color = 施設名_最新)) +
+    geom_line(linewidth = 3) +
+    gghighlight(
+      施設名_最新 %in% highlight_hospitals, 
+      use_direct_label = FALSE,
+      unhighlighted_params = list(linewidth = 0.5)
+    ) +
+    theme_minimal(base_family = "YuGothic", base_size = 20) +
+    scale_x_continuous(breaks = seq(min_year, max_year, by = 1)) +
+    labs(x = "", y = "平均在院日数", color = "", 
+    caption = "出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（３）在院日数の状況』をもとに作成\n比較病院は同じ都道府県内の病院") +
+    theme(legend.position = "top")
+})
+
+
+output$plot_data1_6 <- renderPlot({
+  req(input$dynamicHospital_main)
+
+  selected_hospital_main <- input$dynamicHospital_main
+  selected_hospital_comparison <- input$dynamicHospital_comparison
+
+  plot_data <- data_list_filtered()[["data1_6"]]
+  plot_data$施設名_最新 <- fct_relevel(plot_data$施設名_最新, selected_hospital_main)
+
+  if(is.null(plot_data)) return(NULL)
+
+  highlight_hospitals <- selected_hospital_main
+  if (!is.null(selected_hospital_comparison) && length(selected_hospital_comparison) > 0) {
+    highlight_hospitals <- c(selected_hospital_main, selected_hospital_comparison)
+  }
+
+  plot_data |>
+    ggplot(aes(x = 年度, y = 率, group = 施設名_最新, color = 施設名_最新)) +
+    geom_line(linewidth = 3) +
+    gghighlight(
+      施設名_最新 %in% highlight_hospitals,
+      use_direct_label = FALSE,
+      unhighlighted_params = list(linewidth = 0.5)
+    ) +
+    facet_wrap(~ key) +
+    theme_minimal(base_family = "YuGothic", base_size = 20) +
+    scale_x_continuous(breaks = seq(min_year, max_year, by = 1)) +
+    labs(x = "", y = "率", color = "",
+         caption = "出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（６）救急医療入院』をもとに作成\n比較病院は同じ都道府県内の病院") +
+    theme(legend.position = "top")
+})
+
+# 他院からの紹介の有無
+output$plot_data1_7 <- renderPlot({
+  req(input$dynamicHospital_main)
+
+  selected_hospital_main <- input$dynamicHospital_main
+  selected_hospital_comparison <- input$dynamicHospital_comparison
+
+  plot_data <- data_list_filtered()[["data1_7"]]
+  plot_data$施設名_最新 <- fct_relevel(plot_data$施設名_最新, selected_hospital_main)
+
+  if(is.null(plot_data)) return(NULL)
+
+  highlight_hospitals <- selected_hospital_main
+  if (!is.null(selected_hospital_comparison) && length(selected_hospital_comparison) > 0) {
+    highlight_hospitals <- c(selected_hospital_main, selected_hospital_comparison)
+  }
+
+  plot_data |>
+    ggplot(aes(x = 年度, y = 率, group = 施設名_最新, color = 施設名_最新)) +
+    geom_line(linewidth = 3) +
+    gghighlight(
+      施設名_最新 %in% highlight_hospitals,
+      use_direct_label = FALSE,
+      unhighlighted_params = list(linewidth = 0.5)
+    ) +
+    theme_minimal(base_family = "YuGothic", base_size = 20) +
+    scale_x_continuous(breaks = seq(min_year, max_year, by = 1)) +
+    labs(x = "", y = "他院からの紹介（率）", color = "",
+         caption = "出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（７）他院よりの紹介の有無』をもとに作成\n比較病院は同じ都道府県内の病院") +
+    theme(legend.position = "top")
+})
+
+# 入院経路と退院先をまとめて表示
+output$plot_data1_8_patchwork <- renderPlot({
+  req(input$dynamicHospital_main)
+
+  selected_hospital_main <- input$dynamicHospital_main
+  selected_hospital_comparison <- input$dynamicHospital_comparison
+
+  plot_data <- data_list_filtered()[["data1_8_hospitalization"]]
+  plot_data$施設名_最新 <- fct_relevel(plot_data$施設名_最新, selected_hospital_main)
+
+  if(is.null(plot_data)) return(NULL)
+
+  highlight_hospitals <- selected_hospital_main
+  if (!is.null(selected_hospital_comparison) && length(selected_hospital_comparison) > 0) {
+    highlight_hospitals <- c(selected_hospital_main, selected_hospital_comparison)
+  }
+
+  # 入院経路のプロット
+  plot_hospitalization <- {
+    plot_data_hospitalization <- data_list_filtered()[["data1_8_hospitalization"]]
+    plot_data_hospitalization$施設名_最新 <- fct_relevel(plot_data_hospitalization$施設名_最新, selected_hospital_main)
+
+    if(is.null(plot_data_hospitalization)) return(NULL)
+
+    plot_data_hospitalization |>
+      filter(施設名_最新 %in% highlight_hospitals) |>
+      filter(name != "家庭からの入院") |>
+      mutate(label_value = ifelse(value >= 0.01, paste0(round(value * 100, 1), "%"), "")) |>
+      ggplot(aes(x = 年度, y = value, fill = name)) +
+      geom_bar(stat = "identity", position = "stack") +
+      geom_text(aes(label = label_value), position = position_stack(vjust = 0.5)) +
+      facet_wrap(~ 施設名_最新) +
+      theme_minimal(base_family = "YuGothic", base_size = 20) +
+      scale_x_continuous(breaks = seq(min_year, max_year, by = 1)) +
+      scale_y_continuous(labels = scales::percent) +
+      labs(x = "", y = "", fill = "", title = "入院経路") +
+      theme(legend.position = "top", legend.text = element_text(size = 10), axis.text.x = element_text(angle = 90))
+  }
+
+  # 退院先のプロット
+  plot_discharge <- {
+    plot_data_discharge <- data_list_filtered()[["data1_8_discharge"]]
+    plot_data_discharge$施設名_最新 <- fct_relevel(plot_data_discharge$施設名_最新, selected_hospital_main)
+
+    if(is.null(plot_data_discharge)) return(NULL)
+
+    plot_data_discharge |>
+      filter(施設名_最新 %in% highlight_hospitals) |>
+      filter(!grepl("家庭への退院", name)) |>
+      mutate(label_value = ifelse(value >= 0.01, paste0(round(value * 100, 1), "%"), "")) |>
+      ggplot(aes(x = 年度, y = value, fill = name)) +
+      geom_bar(stat = "identity", position = "stack") +
+      geom_text(aes(label = label_value), position = position_stack(vjust = 0.5)) +
+      facet_wrap(~ 施設名_最新) +
+      theme_minimal(base_family = "YuGothic", base_size = 20) +
+      scale_x_continuous(breaks = seq(min_year, max_year, by = 1)) +
+      scale_y_continuous(labels = scales::percent) +
+      labs(x = "", y = "", fill = "", title = "退院先") +
+      theme(legend.position = "top", legend.text = element_text(size = 10), axis.text.x = element_text(angle = 90))
+  }
+
+  # patchworkで結合し、共通のannotationを付与
+  plot_hospitalization + plot_discharge +
+    plot_annotation(
+      caption = "出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（８）入院経路及び退院先の状況』をもとに作成\n比較病院は同じ都道府県内の病院\n入院経路は家庭からの入院/退院は家庭への退院を除いている",
+      theme = theme(plot.caption = element_text(size = 12))
+    )
+})
+
+
+
+output$plot_data1_9 <- renderPlot({
+  req(input$dynamicHospital_main)
+
+  selected_hospital_main <- input$dynamicHospital_main
+  selected_hospital_comparison <- input$dynamicHospital_comparison
+
+  highlight_hospitals <- selected_hospital_main
+  if (!is.null(selected_hospital_comparison) && length(selected_hospital_comparison) > 0) {
+    highlight_hospitals <- c(selected_hospital_main, selected_hospital_comparison)
+  }
+
+  plot_data_disposition <- data_list_filtered()[["data1_9"]]
+
+  if(is.null(plot_data_disposition)) return(NULL)
+
+  plot_data_disposition |>
+    mutate(name = case_when(
+      name %in% c("治癒", "軽快") ~ "治癒・軽快",
+      TRUE ~ name
+    )) |>
+    #filter(name != "治癒・軽快") |>
+    mutate(name = factor(name)) |>
+    filter(施設名_最新 %in% highlight_hospitals) |>
+    mutate(label_value = ifelse(value >= 0.01, paste0(round(value * 100, 1), "%"), "")) |>
+    ggplot(aes(x = 年度, y = value, fill = name)) +
+    geom_bar(stat = "identity", position = "stack") +
+    geom_text(aes(label = label_value), position = position_stack(vjust = 0.5)) +
+    facet_wrap(~ 施設名_最新) +
+    theme_minimal(base_family = "YuGothic", base_size = 20) +
+    scale_x_continuous(breaks = seq(min_year, max_year, by = 1)) +
+    scale_y_continuous(labels = scales::percent) +
+    labs(x = "", y = "", fill = "", title = "退院時転帰", caption = "出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（９）退院時転帰の状況』をもとに作成\n比較病院は同じ都道府県内の病院") +
+    theme(legend.position = "top", legend.text = element_text(size = 10), axis.text.x = element_text(angle = 90))
+})
+
+output$plot_data1_10 <- renderPlot({
+  req(input$dynamicHospital_main)
+
+  selected_hospital_main <- input$dynamicHospital_main
+  selected_hospital_comparison <- input$dynamicHospital_comparison
+
+  highlight_hospitals <- selected_hospital_main
+  if (!is.null(selected_hospital_comparison) && length(selected_hospital_comparison) > 0) {
+    highlight_hospitals <- c(selected_hospital_main, selected_hospital_comparison)
+  }
+
+  plot_data_rehospitalization <- data_list_filtered()[["data1_10"]]
+
+  if(is.null(plot_data_rehospitalization)) return(NULL)
+
+
+  plot_data_rehospitalization |>
+    filter(施設名_最新 %in% highlight_hospitals) |>
+    mutate(施設名_最新 = fct_relevel(施設名_最新, highlight_hospitals)) |> # Specify the desired order of levels for 'key'
+    mutate(label_value = ifelse(value >= 0.01, paste0(round(value * 100, 1), "%"), "")) |>
+    ggplot(aes(x = 年度, y = value, fill = key, color = time)) +
+    geom_bar(stat = "identity", position = "stack", alpha = 0.7) +
+    geom_text(aes(label = label_value), position = position_stack(vjust = 0.5), color = "grey20") +
+    facet_wrap(~ 施設名_最新) +
+    theme_minimal(base_family = "YuGothic", base_size = 20) +
+    scale_x_continuous(breaks = seq(min_year, max_year, by = 1)) +
+    scale_y_continuous(labels = scales::percent) +
+    scale_color_manual(values = c("blue", "red")) +
+    labs(x = "", y = "", fill = "", title = "再入院", caption = "出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（10）再入院の状況』をもとに作成\n比較病院は同じ都道府県内の病院\n期間：2015年までは6週囲内、2016年からは4週囲内") +
+    theme(legend.position = "top", legend.text = element_text(size = 10), axis.text.x = element_text(angle = 90))
+})
+
+output$plot_data1_12 <- renderPlot({
+  req(input$dynamicHospital_main)
+
+  selected_hospital_main <- input$dynamicHospital_main
+  selected_hospital_comparison <- input$dynamicHospital_comparison
+
+  highlight_hospitals <- selected_hospital_main
+  if (!is.null(selected_hospital_comparison) && length(selected_hospital_comparison) > 0) {
+    highlight_hospitals <- c(selected_hospital_main, selected_hospital_comparison)
+  }
+
+  plot_data_subject <- data_list_filtered()[["data1_12"]]
+
+  if(is.null(plot_data_subject)) return(NULL)
+
+
+  plot_data_subject |>
+    filter(施設名_最新 %in% highlight_hospitals) |>
+    mutate(施設名_最新 = fct_relevel(施設名_最新, highlight_hospitals)) |> # Specify the desired order of levels for 'MDC'
+    mutate(年度 = as.integer(年度)) |>
+    group_by(施設名_最新, MDC) |>
+    mutate(has_any_high_割合 = any(割合 >= 0.1)) |>
+    ungroup() |>
+    mutate(label_value = ifelse(割合 >= 0.1, paste0(round(割合 * 100, 1), "%"), "")) |>
+    mutate(label_MDC = if_else((has_any_high_割合 & 年度 == max(年度)), paste0(MDC), "")) |>
+    ggplot(aes(x = 年度, y = 割合, fill = MDC)) +
+    geom_bar(stat = "identity", position = position_stack(reverse = TRUE)) +
+    geom_text(aes(label = label_value), position = position_stack(vjust = 0.5, reverse = TRUE), color = "grey20") +
+    geom_text_repel(aes(x = 年度 + 1, label = label_MDC), position = position_stack(vjust = 0.5, reverse = TRUE), color = "grey20", direction = "y") +
+    facet_wrap(~ 施設名_最新, scales = "free_y") +
+    theme_minimal(base_family = "YuGothic", base_size = 20) +
+    scale_x_continuous(breaks = seq(as.integer(min_year), as.integer(max_year), by = 1)) +
+    scale_y_continuous(labels = scales::percent) +
+    labs(x = "", y = "割合", fill = "", title = "退院時主診療科", caption = "出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（12）施設別MDC比率』をもとに作成\n比較病院は同じ都道府県内の病院\n割合が10%以上のMDCは表示している") +
+    theme(legend.position = "none", legend.text = element_text(size = 10), axis.text.x = element_text(angle = 90))+
+    coord_flip()
+})
+
+
+
+output$plot_data1_14 <- renderPlot({
+  req(input$dynamicHospital_main, input$mdc_selector)
+
+  selected_hospital_main <- input$dynamicHospital_main
+  selected_hospital_comparison <- input$dynamicHospital_comparison
+  selected_mdc <- input$mdc_selector
+
+  highlight_hospitals <- selected_hospital_main
+  if (!is.null(selected_hospital_comparison) && length(selected_hospital_comparison) > 0) {
+    highlight_hospitals <- c(selected_hospital_main, selected_hospital_comparison)
+  }
+
+  plot_data_animation <- data_list_filtered()[["data1_14"]]
+
+  if(is.null(plot_data_animation)) return(NULL)
+
+
+  plot_data_animation |>
+    filter(施設名_最新 %in% highlight_hospitals) |>
+    mutate(施設名_最新 = fct_relevel(施設名_最新, highlight_hospitals)) |>
+    filter(MDC == selected_mdc) |>
+    filter(!(is.na(患者構成の指標) | is.na(在院日数の指標))) |>
+    ggplot(aes(x = 患者構成の指標, y = 在院日数の指標, color = 年度, label = 年度, group = 年度)) +
+    geom_hline(yintercept = 1) +
+    geom_vline(xintercept = 1) +
+    geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+    geom_label_repel(aes(label = 年度), family = "YuGothic") +
+    facet_wrap(~ 施設名_最新) +
+    theme_minimal(base_family = "YuGothic", base_size = 20) +
+    labs(title = paste0("MDC: ", selected_mdc), x = "患者構成の指標", y = "在院日数の指標", caption = "出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（14）患者構成と在院日数の関係』をもとに作成\n比較病院は同じ都道府県内の病院") +
+    theme(legend.position = "none", legend.text = element_text(size = 10))
+})
+
+### MDC分析
+
+output$plot_data2_2 <- renderPlot({
+  req(input$dynamicHospital_main, input$year_selector, input$operation_selector)
+
+  selected_hospital_main <- input$dynamicHospital_main
+  selected_hospital_comparison <- input$dynamicHospital_comparison
+  selected_year <- input$year_selector
+  selected_operation <- input$operation_selector
+
+  highlight_hospitals <- selected_hospital_main
+  if (!is.null(selected_hospital_comparison) && length(selected_hospital_comparison) > 0) {
+    highlight_hospitals <- c(selected_hospital_main, selected_hospital_comparison)
+  }
+
+  plot_data_mdc_surgery <- data_list_filtered()[["data2_2"]]
+
+  if(is.null(plot_data_mdc_surgery)) return(NULL)
+
+ plot_data_mdc_surgery |> # Use filtered data
+    filter(施設名_最新 %in% highlight_hospitals) |>
+    mutate(施設名_最新 = fct_relevel(施設名_最新, highlight_hospitals)) |>
+    filter(!is.na(value)) |>
+    mutate(年度 = as.integer(年度)) |>
+    mutate(n = sum(value), .by = c(施設名_最新, 手術, 年度)) |>
+    group_by(施設名_最新, MDC, 手術) |>
+    mutate(has_any_high_割合 = any(value/n >= 0.1)) |>
+    ungroup() |>
+    mutate(label_MDC = if_else((has_any_high_割合 & 年度 == max(年度)), paste0(MDC), "")) |>
+    #mutate(施設名_最新 = forcats::fct_rev(施設名_最新)) |>
+    ggplot(aes(x = 年度, y = value, fill = MDC)) +
+    geom_bar(stat = "identity", position = position_stack(reverse = TRUE)) +
+    geom_text_repel(aes(x = 年度 + 1, label = label_MDC), position = position_stack(vjust = 0.5, reverse = TRUE), color = "grey20", direction = "y") +
+    facet_grid(施設名_最新 ~ 手術) +
+    theme_minimal(base_family = "YuGothic", base_size = 20) +
+    scale_x_continuous(breaks = seq(as.integer(min_year), as.integer(max_year), by = 1)) +
+    labs(x = "", y = "件数", fill = "", caption = "出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（２）MDC別医療機関別件数（割合）』をもとに作成\n比較病院は同じ都道府県内の病院\n割合が10%以上のMDCは表示している") +
+    theme(legend.position = "none", legend.text = element_text(size = 10), axis.text.x = element_text(angle = 90))+
+    coord_flip()
+})
+
+
+output$plot_data2_3_4 <- renderPlot({
+  req(input$dynamicHospital_main, input$mdc_selector, input$year_selector) # Use mdc_selector and year_selector
+  # req(input$mdc_slider) # Remove req for mdc_slider
+
+  selected_hospital_main <- input$dynamicHospital_main
+  selected_hospital_comparison <- input$dynamicHospital_comparison
+  selected_mdc <- input$mdc_selector
+
+  highlight_hospitals <- selected_hospital_main
+  if (!is.null(selected_hospital_comparison) && length(selected_hospital_comparison) > 0) {
+    highlight_hospitals <- c(selected_hospital_main, selected_hospital_comparison)
+  }
+
+
+  data2_4_dt <- setDT(copy(data_list_filtered()[["data2_4"]]))[MDC == selected_mdc]
+  setnames(data2_4_dt, "救急車による搬送", "value")
+  selected_cols <- c("市町村番号", "都道府県名", "市町村名", "施設名_最新", "lon", "lat", "年度", "施設名", "告示番号", "MDC", "value")
+  data2_4_processed <- data2_4_dt[, ..selected_cols][, name := "救急車による搬送"]
+
+  data2_3_dt <- setDT(copy(data_list_filtered()[["data2_3"]]))[MDC == selected_mdc]
+
+  data2_3_4_join <-  rbind(data2_3_dt, data2_4_processed)
+  setkey(data2_3_4_join, 市町村番号, 都道府県名, 市町村名, 施設名_最新, 年度)
+
+  data2_3_4_join[, total_value := sum(value, na.rm = TRUE), by = .(施設名_最新, 年度, MDC)]
+  data2_3_4_join[, proportion := value / total_value]
+  data2_3_4_join <- data2_3_4_join[年度 >= 2013]
+
+
+  data2_3_4_join |>
+    tibble() |>
+    filter(!is.na(proportion), !is.na(年度)) |>
+    filter(name != "予定入院") |>
+    mutate(施設名_最新 = fct_relevel(施設名_最新, highlight_hospitals)) |>
+    ggplot(aes(x = 年度, y = proportion, group = 施設名_最新, color = 施設名_最新)) +
+    geom_line(linewidth = 3) +
+    gghighlight(
+      施設名_最新 %in% highlight_hospitals,
+      use_direct_label = FALSE,
+      unhighlighted_params = list(linewidth = 0.5)
+    ) +
+    facet_wrap(~ name) +
+    theme_minimal(base_family = "YuGothic", base_size = 20) +
+    scale_x_continuous(breaks = seq(2013, max_year, by = 1)) +
+    scale_y_continuous(labels = scales::percent) +
+    labs(x = "", y = "", color = "", caption = paste0("出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（３）予定・救急医療入院医療機関別MDC別集計, （４）救急車による搬送の有無の医療機関別MDC別集計』をもとに作成\n比較病院は同じ都道府県内の病院")) +
+    theme(legend.position = "top")
+})
+
+output$plot_data2_8_main_hospital <- renderPlot({
+  req(input$year_selector, input$operation_selector, input$dynamicHospital_main) # Use year_selector and operation_selector
+  # req(input$year_slider_data2_8)
+  # req(input$column_select_data2_8)
+  req(input$dynamicHospital_main)
+
+  validate(
+    need(input$operation_selector %in% c("手術あり", "手術なし", "合計"), # Use operation_selector
+         "Invalid column selection")
+  )
+
+  selected_hospital_main <- input$dynamicHospital_main
+  selected_year_data2_8 <- input$year_selector # input$year_slider_data2_8
+  selected_column_data2_8 <- input$operation_selector # input$column_select_data2_8
+
+  DT_data2_8 <- setDT(copy(data_list_filtered()[["data2_8"]]))
+  DT_data2_8_filtered <- DT_data2_8[年度 == selected_year_data2_8]
+  DT_data2_8_filtered <- DT_data2_8_filtered[施設名_最新 %in% c(selected_hospital_main)]
+
+  DT_data2_8_filtered_plot <- DT_data2_8_filtered |>
+    filter(!!sym(selected_column_data2_8) > 0) |>
+    arrange(施設名_最新, 年度, desc(!!sym(selected_column_data2_8) )) |>
+    mutate(percentage = !!sym(selected_column_data2_8)/sum(!!sym(selected_column_data2_8)), .by = c(施設名_最新, 年度)) |>
+    mutate(cumsum_percentage = cumsum(percentage), .by = c(施設名_最新, 年度)) |>
+    mutate(group_size = rank(desc(!!sym(selected_column_data2_8))), .by = c(施設名_最新, 年度)) |>
+    mutate(value = !!sym(selected_column_data2_8)) |>
+    filter(group_size <= 20)
+
+  ggplot(DT_data2_8_filtered_plot, aes(x = reorder(paste0(病名, " (", MDC_main, ")"), desc(cumsum_percentage)), group = 施設名_最新)) +
+    geom_bar(aes(y = percentage, fill = MDC_main), stat = "identity") +
+    geom_line(aes(y = cumsum_percentage), linewidth = 3, color = "red") +
+    geom_text(aes(label = value, y = percentage), family = "YuGothic", size = 5, hjust = -0.5) +
+    theme_minimal(base_family = "YuGothic", base_size = 14) +
+    scale_y_continuous(labels = scales::percent) +
+    labs(x = "", y = "", color = "", caption = "出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（８）疾患別手術別集計』をもとに作成\n上位20位までを表示している") +
+    coord_flip()
+    #theme(legend.position = "right", axis.text.x = element_text(angle = 90))
+})
+
+
+output$plot_data2_8_municipalities <- renderPlot({
+  req(input$dynamicMunicipality, input$dynamicDisease)
+  
+  selected_prefecture <- input$prefecture
+  selected_municipality <- input$dynamicMunicipality
+  selected_operation <- input$operation_selector
+  selected_disease <- input$dynamicDisease # Use the full label "病名(MDC)"
+  selected_disease_label <- disease_list$病名[disease_list$label == selected_disease]
+
+
+  DT_for_plot <- setDT(copy(data_list_filtered()[["data2_8"]]))
+  DT_for_plot <- mutate(DT_for_plot, value = !!sym(selected_operation))
+  
+  DT_for_plot <- DT_for_plot[病名 == selected_disease_label] # Filter by the full disease label
+  DT_for_plot <- DT_for_plot[value > 0]
+
+  DT_for_plot <- DT_for_plot[市町村名 == selected_municipality]
+  DT_for_plot[, 年度別割合 := value / sum(value), by = 年度]
+
+
+  ggplot(DT_for_plot, aes(x = 年度, y = 施設名_最新, fill = 年度別割合*100, label = paste0(value, "件\n", round(年度別割合*100, 1), "%"))) +
+    geom_tile() +
+    geom_text() +
+    theme_minimal(base_family = "YuGothic", base_size = 14) +
+    scale_fill_gradient(low = "white", high = "red") +
+    labs(x = "", y = "", fill = "地域別割合(%)", title = paste0(selected_disease, "_", selected_operation, "(", selected_prefecture, selected_municipality, ")"), caption = "出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（８）疾患別手術別集計』をもとに作成\n市区町村単位で表示") +
+    theme(legend.position = "top")
+})
+
+
+output$plot_data2_2_municipalities <- renderPlot({
+  req(input$dynamicMunicipality, input$mdc_selector, input$prefecture, input$operation_selector)
+
+  selected_prefecture <- input$prefecture
+  selected_municipality <- input$dynamicMunicipality
+  selected_operation <- input$operation_selector
+  selected_mdc <- input$mdc_selector
+
+  DT <- setDT(copy(data_list_filtered()[["data2_2"]]))
+  DT_casted <- dcast(DT, 年度 + 市町村名 + MDC + 市町村番号 + 都道府県名 + 施設名_最新 ~ 手術, value.var = "value", fun.aggregate = sum, fill = 0)
+  setnames(DT_casted, old = c("有り", "無し"), new = c("手術あり", "手術なし"))
+  DT_casted[, `手術あり` := fcoalesce(`手術あり`, 0L)]
+  DT_casted[, `手術なし` := fcoalesce(`手術なし`, 0L)]
+  DT_casted[, 合計 := `手術あり` + `手術なし`]
+
+
+  DT_casted <- mutate(DT_casted, value = !!sym(selected_operation))
+
+  DT_casted <- DT_casted[MDC == selected_mdc] # Filter by MDC, use MDC instead of MDC_main
+  DT_casted <- DT_casted[value > 0]
+  DT_casted <- DT_casted[市町村名 == selected_municipality]
+
+  DT_casted <- DT_casted[, 年度別割合 := value / sum(value), by = 年度]
+
+
+  ggplot(DT_casted, aes(x = as.integer(年度), y = 施設名_最新, fill = 年度別割合*100, label = paste0(value, "件(", round(年度別割合*100, 1), "%", ")"))) +
+    geom_tile() +
+    geom_text() +
+    theme_minimal(base_family = "YuGothic", base_size = 14) +
+    scale_fill_gradient(low = "white", high = "red") +
+    scale_x_continuous(breaks = seq(as.integer(min_year), as.integer(max_year), by = 1)) +
+    labs(x = "", y = "", fill = "割合(%)", title = paste0(selected_mdc, "_", selected_operation, "(", selected_municipality, ")"), caption = "出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（２）MDC別医療機関別件数（割合）』をもとに作成\n市区町村単位で表示") + # Updated caption to data2_2 and municipality
+    theme(legend.position = "top")
+})
+
+
+
+
+
+
+
+
+
+```
+
+# 基本情報
+
+## Row {height="20%"}
+
+:::{.card title = "主病院"}
+
+```{r}
+textOutput("main_hospital_text")
+```
+
+:::
+
+## Row {.tabset}
+
+```{r}
+#| title: 平均在院日数
+plotOutput("plot_data1_3")
+```
+
+```{r}
+#| title: 救急医療入院
+plotOutput("plot_data1_6")
+```
+
+```{r}
+#| title: 他院からの紹介の有無
+plotOutput("plot_data1_7")
+```
+
+```{r}
+#| title: 入院経路と退院先
+plotOutput("plot_data1_8_patchwork")
+```
+
+```{r}
+#| title: 退院時転帰
+plotOutput("plot_data1_9")
+```
+
+```{r}
+#| title: 再入院
+plotOutput("plot_data1_10")
+```
+
+```{r}
+#| title: 主要MDC
+plotOutput("plot_data1_12")
+```
+
+```{r}
+#| title: 在院日数分析
+plotOutput("plot_data1_14")
+```
+
+# MDC分析
+
+## Row {.tabset}
+
+```{r}
+#| title: 手術別MDC
+plotOutput("plot_data2_2")
+```
+
+```{r}
+#| title: 手術別MDC(市区町村)
+div(style = "overflow-x: auto;", plotOutput("plot_data2_2_municipalities"))
+```
+
+```{r}
+#| title: 緊急入院・救急車による搬送の有無
+plotOutput("plot_data2_3_4")
+```
+
+```{r}
+#| title: 手術別MDC(主病院)
+plotOutput("plot_data2_8_main_hospital")
+```
+
+```{r}
+#| title: 病名別　エリア分析
+plotOutput("plot_data2_8_municipalities")
+```
+
+# ダウンロード
+
+```{r}
+#| title: ダウンロード
+downloadButton("download_plot_all", "グラフをダウンロード")
+```

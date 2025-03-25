@@ -1,0 +1,1309 @@
+---
+title: "Hospital Analysis Report"
+author: "MITTI"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    theme: default
+    warning: false
+params:
+  prefecture: NULL
+  municipality: NULL
+  hospital_main: NULL
+  year: NULL
+  operation: "合計"
+execute:
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+#| echo: false
+
+library(shiny)
+library(data.table)
+library(tidyverse)
+library(DT)
+library(gghighlight)
+library(scales)
+library(ggrepel)
+library(patchwork)
+library(here)
+
+# Set up project directory
+# here::i_amの代わりにもっと安全な方法を使用
+if (file.exists(".here")) {
+  # .hereファイルが存在する場合は何もしない（既に設定済み）
+} else if (dir.exists("rds") && dir.exists("data")) {
+  # プロジェクトのルートディレクトリの特徴を使って判断
+  setwd(getwd())
+} else {
+  # 明示的にディレクトリを設定
+  possible_root <- getwd()
+  while (!dir.exists(file.path(possible_root, "rds")) && 
+         !dir.exists(file.path(possible_root, "data"))) {
+    # 親ディレクトリをチェック
+    parent <- dirname(possible_root)
+    if (parent == possible_root) {
+      # これ以上遡れない場合は現在のディレクトリを使用
+      break
+    }
+    possible_root <- parent
+  }
+  
+  # もしプロジェクトルートが見つかったら設定
+  if (dir.exists(file.path(possible_root, "rds"))) {
+    setwd(possible_root)
+    # .hereファイルを作成してhereパッケージの動作を安定させる
+    file.create(".here")
+  }
+}
+
+# グローバルなggplot2のテーマ設定 - すべての個別設定を上書き
+original_theme <- theme_get()
+
+# OSに応じたフォントの設定
+font_sans <- switch(Sys.info()["sysname"],
+                   "Windows" = "Yu Gothic",
+                   "Darwin"  = "Hiragino Sans",
+                   "Noto Sans CJK JP")
+
+theme_set(theme_minimal(base_size = 12))
+
+# ggtext・geom_text・geom_label関連のフォント設定をデフォルトに
+update_geom_defaults("text", list(family = font_sans))
+update_geom_defaults("label", list(family = font_sans))
+
+# テキスト要素のデフォルト設定を変更
+theme_update(
+  text = element_text(family = font_sans),
+  plot.title = element_text(family = font_sans, size = 14),
+  plot.subtitle = element_text(family = font_sans),
+  plot.caption = element_text(family = font_sans, size = 8),
+  axis.title = element_text(family = font_sans),
+  axis.text = element_text(family = font_sans),
+  legend.text = element_text(family = font_sans, size = 8)
+)
+
+# Load necessary data
+hospital_overview_long <- readRDS(here("rds", "hospital_overview_long.rds"))
+setDT(hospital_overview_long)
+
+disease_list <- readRDS(here("rds", "disease_list.rds"))
+
+# Load individual RDS files
+data1_3 <- readRDS(here("data", "rds", "data1_3.rds"))
+data1_6 <- readRDS(here("data", "rds", "data1_6.rds"))
+data1_7 <- readRDS(here("data", "rds", "data1_7.rds"))
+data1_8_hospitalization <- readRDS(here("data", "rds", "data1_8_hospitalization.rds"))
+data1_8_discharge <- readRDS(here("data", "rds", "data1_8_discharge.rds"))
+data1_9 <- readRDS(here("data", "rds", "data1_9.rds"))
+data1_10 <- readRDS(here("data", "rds", "data1_10.rds"))
+data1_12 <- readRDS(here("data", "rds", "data1_12.rds"))
+data1_14 <- readRDS(here("data", "rds", "data1_14.rds"))
+data2_2 <- readRDS(here("data", "rds", "data2_2.rds"))
+data2_3 <- readRDS(here("data", "rds", "data2_3.rds"))
+data2_4 <- readRDS(here("data", "rds", "data2_4.rds"))
+data2_8 <- readRDS(here("data", "rds", "data2_8.rds"))
+
+# Convert to data.tables
+setDT(data1_3)
+setDT(data1_6)
+setDT(data1_7)
+setDT(data1_8_hospitalization)
+setDT(data1_8_discharge)
+setDT(data1_9)
+setDT(data1_10)
+setDT(data1_12)
+setDT(data1_14)
+setDT(data2_2)
+setDT(data2_3)
+setDT(data2_4)
+setDT(data2_8)
+
+min_year <- min(data1_3$年度, na.rm = TRUE)
+max_year <- max(data1_3$年度, na.rm = TRUE)  
+
+prefectures <- readRDS(here("rds", "prefectures.rds"))
+municipalities <- readRDS(here("rds", "municipalities.rds"))
+hospitals <- readRDS(here("rds", "hospitals.rds"))
+hospitals_municipalities <- readRDS(here("rds", "hospitals_municipalities.rds"))
+
+# Filter function for prefecture
+filter_by_prefecture <- function(dt, prefecture) {
+  if ("都道府県名" %in% names(dt)) {
+    dt[都道府県名 == prefecture]
+  } else {
+    dt
+  }
+}
+
+# 基本設定 - 全セクションで共通の処理を最初にまとめて行う
+selected_hospital_main <- params$hospital_main
+selected_hospital_comparison <- character(0)
+selected_year <- params$year
+selected_operation <- params$operation
+selected_prefecture <- params$prefecture
+selected_municipality <- params$municipality
+
+# Error prevention
+if (is.null(selected_hospital_comparison)) {
+  selected_hospital_comparison <- character(0)
+}
+
+# Common highlight_hospitals setting
+highlight_hospitals <- selected_hospital_main
+```
+
+```{r}
+#| label: user-inputs
+#| include: false
+#| echo: false
+
+# Parameters are provided directly from the dashboard
+# No need for Shiny UI in this standalone report
+```
+
+# 病院分析レポート
+
+## このレポートについて
+
+このレポートは`r params$hospital_main` の分析レポート件数をChatGPTへの入力用プロンプトとして作成しています。
+
+そのためAIに向けた口調で作成しています。
+
+またAIに読み込ませる時はこのファイルを印刷→pdfで保存をして読み込ませます。
+
+ChatGPTの有料版を契約している方は次のurlで読み込ませてください。
+
+https://chatgpt.com/g/g-67df3520a9d481919a32a42ff8001425-tui-yuan-huan-zhe-diao-cha-analysis
+
+それ以外のAIであれば以下のプロンプトを入力してください。
+
+```         
+# アップロードされたpdfを分析して
+- あなたは医療コンサルタントのシニアマネージャーです。
+- このファイルは「DPC導入の影響評価に係る調査「退院患者調査」の結果報告」の2012年度からの経時変化を示したグラフがたくさんあります。分析の目標は知らない人に主病院はなにが強い病院なのか？をコンサルタントとして伝えることです。たくさんあるグラフを結果を多角的に分析して、主病院の主要MDC,top20の病名が手術あり・なし・合計の視点で約10年分のデータを分析することができます。
+ここに表示されている主病院がこの10年でなにが起こったのかを事実ベースで分析して。ただグラフを1つずつ解説してほしいのではない。復数のグラフからどう要約できるかが大事である。
+
+最終的には主病院は手術あり・なし合計で何に強いのか？地域のシェアや役割は何か（急性期のように受ける病院、急性期から受ける病院、こういった手術が多い病院など）を入退院経路などを含めて分析して）。そして、この10年で強みは維持できているのかどうか、新しい強みが出現していないかどうかも分析して。
+
+
+## 注意点
+- 推測で語らないで。最新にアップロードされたpdfを先頭から順番に読み込んでください。
+- pdfのレポートにそれぞれ章立てて、何の分析か？どういう事を分析してほしいか、注意点を提示しています。
+- 分析してくださいと書いてある所は分析してください。まだ分析していないことに関してはあえて言わないでください。
+- 1つの章ごとに読み取り, 分析, 出力を続け、次の章に進んでください
+- pdfの中にも書いていますが、前の章の分析も含めて多角的に分析するところもありますが、明示していますので、pdfの内容通りに進めてください。
+- ハルシネーションを起こさなくて良いように、章ごとにインデックス化し、再利用できるようよしなに対応してください
+- 新しいpdfがアップロードされたら、特に指定がない限りそれまでの分析結果はリセットして、新たに分析し直してください。
+- 使い方を質問されたらsample.pdfを分析してください
+```
+
+## 基本情報
+
+主病院: `r params$hospital_main`\
+都道府県: `r params$prefecture`\
+市区町村: `r params$municipality`
+
+## 主要MDC
+
+`r params$hospital_main` の主要MDCを分析します。
+
+次のグラフに表示されているMDCは割合が10%以上を示しています。
+
+次のグラフを読み取り、特に割合の高いMDCはどれかを分析してください。
+
+このMDCが今後の解析の中でも重点項目となります。
+
+ただ、手術のあり・なしで今後の分析の方向性が変わる可能性があることに注意が必要です。
+
+```{r}
+#| echo: false
+#| fig.height: 10
+#| fig.width: 10
+
+plot_data_subject <- filter_by_prefecture(data1_12, params$prefecture)
+if(!is.null(plot_data_subject)) {
+  # データの加工結果を変数に代入するように修正
+  plot_data_subject <- plot_data_subject |>
+    filter(施設名_最新 %in% highlight_hospitals) |>
+    mutate(年度 = as.integer(年度)) |>
+    group_by(施設名_最新, MDC) |>
+    mutate(has_any_high_割合 = any(割合 >= 0.1)) |>
+    ungroup() |>
+    mutate(label_value = ifelse(割合 >= 0.1, paste0(round(割合 * 100, 1), "%"), "")) |>
+    mutate(label_MDC = if_else((has_any_high_割合 & 年度 == max(年度)), paste0(MDC), ""))
+
+  if(nrow(plot_data_subject) > 0) {
+    ggplot(data = plot_data_subject, aes(x = 年度, y = 割合, fill = MDC)) +
+      geom_bar(stat = "identity", position = position_stack(reverse = TRUE)) +
+      geom_text(aes(label = label_value), position = position_stack(vjust = 0.5, reverse = TRUE), color = "grey20", family = font_sans) +
+      geom_text_repel(aes(x = 年度 + 1, label = label_MDC), 
+                    position = position_stack(vjust = 0.5, reverse = TRUE), 
+                    color = "grey20", direction = "y", family = font_sans) +
+      facet_wrap(~ 施設名_最新, scales = "free_y") +
+      theme_minimal(base_size = 12, base_family = font_sans) +
+      scale_x_continuous(breaks = seq(as.integer(min_year), as.integer(max_year), by = 1)) +
+      scale_y_continuous(labels = scales::percent) +
+      labs(x = "", y = "割合", fill = "", title = "退院時主診療科",
+           caption = "出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（12）施設別MDC比率』をもとに作成\n比較病院は同じ都道府県内の病院\n割合が10%以上のMDCは表示している") +
+      theme(legend.position = "none",
+            text = element_text(family = font_sans),
+            plot.title = element_text(family = font_sans),
+            plot.caption = element_text(family = font_sans),
+            axis.text = element_text(family = font_sans)) +
+      coord_flip()
+  } else {
+    return(NULL)
+  }
+}
+```
+
+## 手術別MDC
+
+次に手術別MDCを分析します。
+
+次のグラフは手術のあり・なしのグラフを表示しています。
+
+ここも数値があるMDCは10％以上を表示しています。
+
+それだけでなく、直接棒グラフを見て絶対数の多いMDCはどれかを分析してください。
+
+主要MDCに表示されているMDCでここにも表示されていれば重点項目となります。
+
+主要MDCに表示されていないMDCでここに表示されている場合は、今後手術あり・なしの分析の際には検討すべきMDCと言えますが、最重要ではない可能性があり、次点での重要度となります。
+
+また時系列の中で重点項目がどのように変化しているかを分析してください。
+
+今後の分析にも影響します。
+
+```{r}
+#| echo: false
+#| fig.height: 6
+#| fig.width: 10
+
+plot_data_mdc_surgery <- filter_by_prefecture(data2_2, params$prefecture)
+
+if(!is.null(plot_data_mdc_surgery)) {
+  # データの前処理を一度だけ行う
+  plot_data_mdc_surgery <- plot_data_mdc_surgery |>
+    filter(施設名_最新 == selected_hospital_main) |>
+    filter(!is.na(value)) |>
+    mutate(年度 = as.integer(年度)) |>
+    mutate(n = sum(value), .by = c(施設名_最新, 手術, 年度)) |>
+    group_by(施設名_最新, MDC, 手術) |>
+    mutate(has_any_high_割合 = any(value/n >= 0.1)) |>
+    ungroup() |>
+    mutate(label_MDC = if_else((has_any_high_割合 & 年度 == max(年度)), paste0(MDC), ""))
+
+
+  if(nrow(plot_data_mdc_surgery) > 0 && length(unique(plot_data_mdc_surgery$手術)) > 0) {
+    ggplot(data = plot_data_mdc_surgery, aes(x = 年度, y = value, fill = MDC)) +
+      geom_bar(stat = "identity", position = position_stack(reverse = TRUE)) +
+      geom_text_repel(aes(x = 年度 + 1, label = label_MDC), 
+                      position = position_stack(vjust = 0.5, reverse = TRUE), 
+                      color = "grey20", direction = "y", family = font_sans) +
+      facet_wrap(~手術) +
+      theme_minimal(base_size = 12, base_family = font_sans) +
+      scale_x_continuous(breaks = seq(as.integer(min_year), as.integer(max_year), by = 1)) +
+      labs(x = "", y = "件数", fill = "", 
+           caption = "出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（２）MDC別医療機関別件数（割合）』をもとに作成\n割合が10%以上のMDCは表示している") +
+      theme(legend.position = "none",
+            text = element_text(family = font_sans),
+            plot.title = element_text(family = font_sans),
+            plot.caption = element_text(family = font_sans),
+            axis.text = element_text(family = font_sans, angle = 90)) +
+      coord_flip()
+  }
+}
+```
+
+## 主要病名
+
+ここでは、最新年度の手術あり・なし・合計の中で、主要病名をtop20で表示しています。
+
+この病名が `r params$hospital_main` の主要病名となります。
+
+この病名が今後の分析においても重点項目となります。
+
+特に入院経路や退院先、紹介の有無、緊急入院、がん関連、在院日数に影響を及ぼす可能性があります。
+
+```{r}
+#| echo: false
+#| results: asis
+
+
+
+# データの読み込みと初期フィルタリング
+DT_data2_8 <- filter_by_prefecture(data2_8, params$prefecture)
+current_year_for_text <- max_year # Use the latest year for text output
+operation_types_for_text <- c("手術あり", "手術なし", "合計")
+
+# 各手術タイプでテキストを出力
+for(current_operation in operation_types_for_text) {
+  cat(sprintf("\n\n#### %s年度 - %s でピックアップされた主要病名 (MDC):\n\n", current_year_for_text, current_operation))
+
+  # データのフィルタリングと処理 (similar to the plot code, but for text)
+  plot_data_text <- DT_data2_8 %>% filter(年度 == current_year_for_text & 施設名_最新 == selected_hospital_main)
+  
+
+  if(nrow(plot_data_text) > 0) {
+    plot_data_text <- plot_data_text[get(current_operation) > 0]
+    if(nrow(plot_data_text) > 0) {
+      plot_data_text <- plot_data_text[order(-get(current_operation))]
+      top_n <- min(10, nrow(plot_data_text)) # Output top 10 or fewer if less than 10
+      plot_data_text <- head(plot_data_text, top_n)
+
+      if(nrow(plot_data_text) > 0) {
+        for(i in 1:nrow(plot_data_text)) {
+          cat(sprintf("- %s (%s)\n", plot_data_text[i, 病名], plot_data_text[i, MDC_main]))
+        }
+      } else {
+        cat("データが存在しないため、病名を表示できません。\n")
+      }
+    } else {
+      cat("フィルタリング後のデータが存在しません。\n")
+    }
+  } else {
+    cat("指定された年度・病院のデータが存在しません。\n")
+  }
+}
+```
+
+## 平均在院日数
+
+`r params$hospital_main` の時系列データを分析します。
+
+折れ線グラフから在院日数が短くなっているか、キープしているか、長くなっているかを分析してください。
+
+この分析結果は今後の入院経路・退院経路・手術のグラフから何が在院日数に影響しているかを分析することに繋がります。
+
+```{r}
+#| echo: false
+#| fig.height: 6
+#| fig.width: 10
+
+plot_data <- filter_by_prefecture(data1_3, params$prefecture)
+if(!is.null(plot_data)) {
+  plot_data$施設名_最新 <- fct_relevel(plot_data$施設名_最新, selected_hospital_main)
+
+  if(nrow(plot_data) > 0) {
+    plot_data |>
+      ggplot(aes(x = 年度, y = 平均値, group = 施設名_最新, color = 施設名_最新)) +
+      geom_line(linewidth = 3) +
+      gghighlight(
+        施設名_最新 %in% highlight_hospitals,
+        use_direct_label = FALSE,
+        unhighlighted_params = list(linewidth = 0.5)
+      ) +
+      theme_minimal(base_size = 12, base_family = font_sans) +
+      scale_x_continuous(breaks = seq(min_year, max_year, by = 1)) +
+      labs(x = "", y = "平均在院日数", color = "",
+           caption = "出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（３）在院日数の状況』をもとに作成\n比較病院は同じ都道府県内の病院") +
+      theme(legend.position = "top",
+            text = element_text(family = font_sans),
+            plot.title = element_text(family = font_sans),
+            plot.caption = element_text(family = font_sans),
+            axis.text = element_text(family = font_sans))
+  } else {
+    return(NULL)
+  }
+}
+```
+
+## 救急医療入院
+
+ここでは、救急医療入院・予定外入院の割合を分析しています。
+
+この割合が高い・低いは地域の役割を示すことになります。
+
+灰色の線は同じ都道府県内の病院のデータとなっています。
+
+まずは今までの知識に頼らず、それぞれのグラフを読み取り、キープしている・減っている・増えているかを分析してください。
+
+その後、この先の他院からの紹介の有無・入院経路と退院先・退院時転機・再入院も含めて多角的に分析する必要があることを留意して分析してください。
+
+```{r}
+#| echo: false
+#| fig.height: 6
+#| fig.width: 10
+
+plot_data <- filter_by_prefecture(data1_6, params$prefecture)
+if(!is.null(plot_data)) {
+  plot_data$施設名_最新 <- fct_relevel(plot_data$施設名_最新, selected_hospital_main)
+  if(nrow(plot_data) > 0) {
+  plot_data |>
+    ggplot(aes(x = 年度, y = 率, group = 施設名_最新, color = 施設名_最新)) +
+    geom_line(linewidth = 3) +
+    gghighlight(
+      施設名_最新 %in% highlight_hospitals,
+      use_direct_label = FALSE,
+      unhighlighted_params = list(linewidth = 0.5)
+    ) +
+    facet_wrap(~ key) +
+    theme_minimal(base_size = 12, base_family = font_sans) +
+    scale_x_continuous(breaks = seq(min_year, max_year, by = 1)) +
+    labs(x = "", y = "率", color = "",
+         caption = "出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（６）救急医療入院』をもとに作成\n比較病院は同じ都道府県内の病院") +
+      theme(legend.position = "top",
+            text = element_text(family = font_sans),
+            plot.title = element_text(family = font_sans),
+            plot.caption = element_text(family = font_sans),
+            axis.text = element_text(family = font_sans))
+  } else {
+    return(NULL)
+  }
+}
+```
+
+## 他院からの紹介の有無
+
+ここでは、他院からの紹介の有無を分析しています。
+
+この割合が高い・低いは地域の役割を示すことになります。
+
+灰色の線は同じ都道府県内の病院のデータとなっています。
+
+まずは今までの知識に頼らず、今回のグラフを読み取り、キープしている・減っている・増えているかを分析してください。
+
+その後、他院からの紹介の有無・入院経路と退院先・退院時転機・再入院も含めて多角的に分析する必要があることを留意して分析してください。
+
+```{r}
+#| echo: false
+#| fig.height: 6
+#| fig.width: 10
+
+plot_data <- filter_by_prefecture(data1_7, params$prefecture)
+if(!is.null(plot_data)) {
+  plot_data$施設名_最新 <- fct_relevel(plot_data$施設名_最新, selected_hospital_main)
+
+  if(nrow(plot_data) > 0) {
+  plot_data |>
+    ggplot(aes(x = 年度, y = 率, group = 施設名_最新, color = 施設名_最新)) +
+    geom_line(linewidth = 3) +
+    gghighlight(
+      施設名_最新 %in% highlight_hospitals,
+      use_direct_label = FALSE,
+      unhighlighted_params = list(linewidth = 0.5)
+    ) +
+    theme_minimal(base_size = 12, base_family = font_sans) +
+    scale_x_continuous(breaks = seq(min_year, max_year, by = 1)) +
+    labs(x = "", y = "他院からの紹介（率）", color = "",
+         caption = "出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（７）他院よりの紹介の有無』をもとに作成\n比較病院は同じ都道府県内の病院") +
+      theme(legend.position = "top",
+            text = element_text(family = font_sans),
+            plot.title = element_text(family = font_sans),
+            plot.caption = element_text(family = font_sans),
+            axis.text = element_text(family = font_sans))
+  } else {
+    return(NULL)
+  }
+}
+```
+
+## 入院経路と退院先
+
+ここでは、入院経路と退院先を分析しています。
+
+基本的には家庭からの入院/家庭への退院が多いのが通常です。
+
+その上で今までの知識に頼らず、今回のグラフを時系列として読み取り、それぞれの経路がどのように変化しているかを分析してください。
+
+その後、他院からの紹介の有無・入院経路と退院先・退院時転機・再入院も含めて多角的に分析する必要があることを留意して分析してください。
+
+特にMDCや手術の主要区項目・重点項目事に傾向は違うかもしれません。多角的に分析し、最後の出力で修正が必要であれば最後に修正してください。
+
+```{r}
+#| echo: false
+#| fig.height: 8
+#| fig.width: 10
+
+# 入院経路のプロット
+plot_hospitalization <- {
+  plot_data_hospitalization <- filter_by_prefecture(data1_8_hospitalization, params$prefecture)
+  if(!is.null(plot_data_hospitalization)) {
+    # データの加工結果を変数に代入
+    plot_data_hospitalization <- plot_data_hospitalization |>
+      filter(施設名_最新 %in% highlight_hospitals) |>
+      filter(name != "家庭からの入院") |>
+      mutate(label_value = ifelse(value >= 0.01, paste0(round(value * 100, 1), "%"), ""))
+
+    if(nrow(plot_data_hospitalization) > 0) {
+      ggplot(data = plot_data_hospitalization, aes(x = 年度, y = value, fill = name)) +
+        geom_bar(stat = "identity", position = "stack") +
+        geom_text(aes(label = label_value), position = position_stack(vjust = 0.5), family = font_sans) +
+        facet_wrap(~ 施設名_最新) +
+        theme_minimal(base_size = 12, base_family = font_sans) +
+        scale_x_continuous(breaks = seq(min_year, max_year, by = 1)) +
+        scale_y_continuous(labels = scales::percent) +
+        labs(x = "", y = "", fill = "", title = "入院経路") +
+        theme(legend.position = "top",
+              text = element_text(family = font_sans),
+              plot.title = element_text(family = font_sans),
+              plot.caption = element_text(family = font_sans),
+              axis.text = element_text(family = font_sans, angle = 90))
+    } else {
+      return(NULL)
+    }
+  }
+}
+
+# 退院先のプロット
+plot_discharge <- {
+  plot_data_discharge <- filter_by_prefecture(data1_8_discharge, params$prefecture)
+  if(!is.null(plot_data_discharge)) {
+    # データの加工結果を変数に代入
+    plot_data_discharge <- plot_data_discharge |>
+      filter(施設名_最新 %in% highlight_hospitals) |>
+      filter(!grepl("家庭への退院", name)) |>
+      mutate(label_value = ifelse(value >= 0.01, paste0(round(value * 100, 1), "%"), ""))
+
+    if(nrow(plot_data_discharge) > 0) {
+      ggplot(data = plot_data_discharge, aes(x = 年度, y = value, fill = name)) +
+        geom_bar(stat = "identity", position = "stack") +
+        geom_text(aes(label = label_value), position = position_stack(vjust = 0.5), family = font_sans) +
+        facet_wrap(~ 施設名_最新) +
+        theme_minimal(base_size = 12, base_family = font_sans) +
+        scale_x_continuous(breaks = seq(min_year, max_year, by = 1)) +
+        scale_y_continuous(labels = scales::percent) +
+        labs(x = "", y = "", fill = "", title = "退院先") +
+        theme(legend.position = "top",
+              text = element_text(family = font_sans),
+              plot.title = element_text(family = font_sans),
+              plot.caption = element_text(family = font_sans),
+              axis.text = element_text(family = font_sans, angle = 90))
+    } else {
+      return(NULL)
+    }
+  }
+}
+
+# patchworkで結合し、共通のannotationを付与
+if(!is.null(plot_hospitalization) && !is.null(plot_discharge)) {
+  plot_hospitalization + plot_discharge +
+    plot_annotation(
+      caption = "出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（８）入院経路及び退院先の状況』をもとに作成\n比較病院は同じ都道府県内の病院\n入院経路は家庭からの入院/退院は家庭への退院を除いている",
+      theme = theme(plot.caption = element_text(size = 8))
+    )
+} else {
+  return(NULL)
+}
+```
+
+## 再入院
+
+ここでは、再入院の状況を分析しています。
+
+棒グラフの塗っている色は同一疾患か異なる疾患かを示しています。
+
+棒グラフの周りの線の色は期間以降・以内を示しています。
+
+この期間は2015年までは6週囲内、2016年からは4週囲内です。
+
+特にがんが多い病院は再入院することも多いため、影響を受けることがあります。
+
+まずは今までの知識に頼らず、このグラフを時系列に読み取って、割合の返歌が起きていないかを分析してください。
+
+その後、この先の他院からの紹介の有無・入院経路と退院先・退院時転機・再入院も含めて多角的に分析する必要があることを留意して分析してください。
+
+```{r}
+#| echo: false
+#| fig.height: 6
+#| fig.width: 10
+
+plot_data_rehospitalization <- filter_by_prefecture(data1_10, params$prefecture)
+if(!is.null(plot_data_rehospitalization)) {
+  # データの加工結果を変数に代入するように修正
+  plot_data_rehospitalization <- plot_data_rehospitalization |>
+    filter(施設名_最新 %in% highlight_hospitals) |>
+    mutate(施設名_最新 = fct_relevel(施設名_最新, highlight_hospitals)) |>
+    mutate(label_value = ifelse(value >= 0.01, paste0(round(value * 100, 1), "%"), ""))
+
+  if(nrow(plot_data_rehospitalization) > 0) {
+    ggplot(data = plot_data_rehospitalization, aes(x = 年度, y = value, fill = key, color = time)) +
+      geom_bar(stat = "identity", position = "stack", alpha = 0.7) +
+      geom_text(aes(label = label_value), position = position_stack(vjust = 0.5), 
+                color = "grey20", family = font_sans) +
+      facet_wrap(~ 施設名_最新) +
+      theme_minimal(base_size = 12, base_family = font_sans) +
+      scale_x_continuous(breaks = seq(min_year, max_year, by = 1)) +
+      scale_y_continuous(labels = scales::percent) +
+      scale_color_manual(values = c("blue", "red")) +
+      labs(x = "", y = "", fill = "", title = "再入院",
+           caption = "出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（10）再入院の状況』をもとに作成\n期間：2015年までは6週囲内、2016年からは4週囲内") +
+      theme(legend.position = "top",
+            text = element_text(family = font_sans),
+            plot.title = element_text(family = font_sans),
+            plot.caption = element_text(family = font_sans),
+            axis.text = element_text(family = font_sans, angle = 90))
+  } else {
+    return(NULL)
+  }
+}
+```
+
+## 退院時転帰
+
+ここでは、退院時に治癒・軽快・不変・死亡などの転機を分析しています。
+
+まずは今までの知識に頼らず、このグラフを時系列に読み取って、割合の変化が起きているかどうかを分析してください。
+
+その後、この先の他院からの紹介の有無・入院経路と退院先・退院時転機・再入院も含めて多角的に分析する必要があることを留意して分析してください。
+
+ここの時系列で割合の変化が起きているかどうかを分析してください。
+
+```{r}
+#| echo: false
+#| fig.height: 6
+#| fig.width: 10
+
+plot_data_disposition <- filter_by_prefecture(data1_9, params$prefecture)
+if(!is.null(plot_data_disposition)) {
+  # データの加工結果を変数に代入するように修正
+  plot_data_disposition <- plot_data_disposition |>
+    mutate(name = case_when(
+      name %in% c("治癒", "軽快") ~ "治癒・軽快",
+      TRUE ~ name
+    )) |>
+    mutate(name = factor(name)) |>
+    filter(施設名_最新 %in% highlight_hospitals) |>
+    mutate(label_value = ifelse(value >= 0.01, paste0(round(value * 100, 1), "%"), ""))
+
+  if(nrow(plot_data_disposition) > 0) {
+    ggplot(data = plot_data_disposition, aes(x = 年度, y = value, fill = name)) +
+      geom_bar(stat = "identity", position = "stack") +
+      geom_text(aes(label = label_value), position = position_stack(vjust = 0.5), family = font_sans) +
+      facet_wrap(~ 施設名_最新) +
+      theme_minimal(base_size = 12, base_family = font_sans) +
+      scale_x_continuous(breaks = seq(min_year, max_year, by = 1)) +
+      scale_y_continuous(labels = scales::percent) +
+      labs(x = "", y = "", fill = "", title = "退院時転帰",
+           caption = "出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（９）退院時転帰の状況』をもとに作成\n比較病院は同じ都道府県内の病院") +
+      theme(legend.position = "top",
+            text = element_text(family = font_sans),
+            plot.title = element_text(family = font_sans),
+            plot.caption = element_text(family = font_sans),
+            axis.text = element_text(family = font_sans, angle = 90))
+  } else {
+    return(NULL)
+  }
+}
+```
+
+## 在院日数分析（MDC別）
+
+ここでは、在院日数の分析をしています。
+
+散布図のラベルは年度となっており、時系列の変化を読み取ることができます。
+
+この散布図は、以下の2つの指標を軸にしています。
+
+-   **患者構成の指標**\
+    全国の在院日数の平均を基準とし、以下の式で計算されます：
+
+    ```         
+    患者構成の指標 ＝（全国の在院日数の平均を使用した場合） ÷ 12.23
+    ```
+
+    → 値が **1より大きい** ＝ 重症度の高い疾患が多い構成\
+    → 値が **1より小さい** ＝ 軽症の疾患が多い構成
+
+-   **在院日数の指標**\
+    全国平均の患者構成を用いて補正された各医療機関の在院日数との比であり、以下の式で計算されます：
+
+    ```         
+    在院日数の指標 ＝ 全国の在院日数の平均 ÷（全国の疾患構成に補正した在院日数）
+    ```
+
+    → 値が **1より大きい** ＝ 全国平均より在院日数が短い（＝効率的）\
+    → 値が **1より小さい** ＝ 全国平均より在院日数が長い（＝非効率的）
+
+    ### 散布図の4象限解釈
+
+この2軸の交差によってできる散布図は、平均値（＝1.00）を基準に4つの象限に分かれます。それぞれの象限の解釈は以下の通りです。
+
+#### 第1象限（横軸\>1, 縦軸\>1）
+
+**「重症患者構成」かつ「在院日数短縮できている」**
+
+-   高度急性期病院や大学病院など、高度な医療を必要とする患者が多い
+-   それでも在院日数を短縮できており、プロセス効率・連携が良好
+-   → **理想的な医療提供体制**
+
+#### 第2象限（横軸\<1, 縦軸\>1）
+
+**「軽症患者構成」かつ「在院日数短縮できている」**
+
+-   平均的な地域病院や中小病院が含まれる
+-   軽症中心ではあるが、効率的な運用がなされている
+-   → **効率運用の成功例**
+
+#### 第3象限（横軸\<1, 縦軸\<1）
+
+**「軽症患者構成」かつ「在院日数が長い」**
+
+-   本来ならば早期退院が可能な構成だが、在院期間が長い
+-   退院調整の遅れやベッド管理の非効率性が疑われる
+-   → **改善余地のある医療機関**
+
+#### 第4象限（横軸\>1, 縦軸\<1）
+
+**「重症患者構成」かつ「在院日数が長い」**
+
+-   医療資源を必要とする患者が多く、在院期間も長期化
+-   がん末期や複数合併症のある高齢者なども想定される
+-   → **構造的な理由がある可能性も含め、要検討の領域**
+
+------------------------------------------------------------------------
+
+### 活用例
+
+この散布図を用いることで、医療機関ごとの特性や課題を可視化しやすくなります。
+
+このグラフはMDC別に分析していますが、まずは主要MDCや重点項目を中心に分析してください。
+
+上記の説明からグラフを時系列に読み取って、傾向の変化が起きていないかを分析してください。
+
+今までの分析（在院日数など）と合わせて多角的に分析してください。
+
+```{r}
+#| echo: false
+#| fig.height: 8
+#| fig.width: 10
+#| results: asis
+
+plot_data_animation <- filter_by_prefecture(data1_14, params$prefecture)
+
+if(!is.null(plot_data_animation) && nrow(plot_data_animation) > 0) {
+  # Define all MDC values
+  all_mdcs <- paste0("MDC", sprintf("%02d", 1:18))
+  
+  # データの前処理を一度だけ行う
+  plot_data_animation <- plot_data_animation |>
+    filter(施設名_最新 %in% highlight_hospitals) |>
+    mutate(施設名_最新 = fct_relevel(施設名_最新, highlight_hospitals)) |>
+    filter(!(is.na(患者構成の指標) | is.na(在院日数の指標)))
+  
+  # 前処理後のデータが存在する場合のみ処理を続行
+  if(nrow(plot_data_animation) > 0) {
+    # Iterate through each MDC and create a plot
+    for(current_mdc in all_mdcs) {
+      # Create subset for the current MDC
+      mdc_data <- plot_data_animation |>
+        filter(MDC == current_mdc)
+      
+      # Only create plot if there is data for this MDC and 施設名_最新
+      if(nrow(mdc_data) > 0 && length(unique(mdc_data$施設名_最新)) > 0) {
+        cat("\n\n### ", current_mdc, "\n\n")
+        
+        p <- ggplot(data = mdc_data, 
+               aes(x = 患者構成の指標, y = 在院日数の指標, 
+                   color = 年度, label = 年度, group = 年度)) +
+          geom_hline(yintercept = 1) +
+          geom_vline(xintercept = 1) +
+          geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+          geom_label_repel(aes(label = 年度), family = font_sans) +
+          facet_wrap(~ 施設名_最新) +
+          theme_minimal(base_size = 12, base_family = font_sans) +
+          labs(title = paste0("MDC: ", current_mdc), 
+               x = "患者構成の指標", 
+               y = "在院日数の指標", 
+               caption = "出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（14）患者構成と在院日数の関係』をもとに作成\n比較病院は同じ都道府県内の病院") +
+          theme(legend.position = "none",
+                text = element_text(family = font_sans),
+                plot.title = element_text(family = font_sans),
+                plot.caption = element_text(family = font_sans),
+                axis.text = element_text(family = font_sans))
+        
+        print(p)
+      }
+    }
+  }
+}
+```
+
+# MDC分析
+
+ここでは、市区町村別のMDC別の分析をしています。
+
+主要MDCや重点項目を中心に分析してください。同時に今までの分析に見落としや事実ベースで間違っている箇所がないかを分析してください。
+
+注意点として、このグラフは市区町村別の％となっています。
+
+そのため％は二次医療圏での割合ではないため、あくまでも市町村単位での分析に使用してください。
+
+ただし、実数の増減は今回の市町村以外の影響も受ける可能性があるので、実数の分析は二次医療圏の別の市町村が増減すれば変化する可能性があることに留意して分析してください。
+
+実際に他の市区町村の数値はないため、ここだけで結論つけられないですが、主病院の各MDCが時系列で何が増えて減っているのか？という分析に関してはグラフから読み取ることが可能です。
+
+## 手術別MDC（市区町村別・MDC別）
+
+```{r}
+#| echo: false
+#| results: asis
+#| fig.height: 12
+#| fig.width: 10
+
+# Get MDC list for the main hospital
+DT <- setDT(copy(filter_by_prefecture(data2_2, params$prefecture)))
+MDC_selected <- unique(DT[施設名_最新 == selected_hospital_main, MDC])
+
+# Create individual graphs for each MDC
+for(current_mdc in MDC_selected) {
+  cat("\n\n### ", current_mdc, "\n\n")
+  
+  DT_casted <- dcast(DT, 年度 + 市町村名 + MDC + 市町村番号 + 都道府県名 + 施設名_最新 ~ 手術, value.var = "value", fun.aggregate = sum, fill = 0)
+  setnames(DT_casted, old = c("有り", "無し"), new = c("手術あり", "手術なし"))
+  DT_casted[, `手術あり` := fcoalesce(`手術あり`, 0L)]
+  DT_casted[, `手術なし` := fcoalesce(`手術なし`, 0L)]
+  DT_casted[, 合計 := `手術あり` + `手術なし`]
+  
+  DT_casted <- mutate(DT_casted, value = !!sym(selected_operation))
+  
+  DT_casted <- DT_casted[MDC == current_mdc]
+  DT_casted <- DT_casted[value > 0]
+  DT_casted <- DT_casted[市町村名 == selected_municipality]
+  
+  DT_casted <- DT_casted[, 年度別割合 := value / sum(value), by = 年度]
+  
+  p <- ggplot(DT_casted, aes(x = as.integer(年度), y = 施設名_最新, fill = 年度別割合*100, label = paste0(value, "件(", round(年度別割合*100, 1), "%", ")"))) +
+    geom_tile() +
+    geom_text(aes(label = paste0(value, "件\n", round(年度別割合*100, 1), "%")), family = font_sans) +
+    theme_minimal(base_size = 12, base_family = font_sans) +
+    scale_fill_gradient(low = "white", high = "red") +
+    scale_x_continuous(breaks = seq(as.integer(min_year), as.integer(max_year), by = 1)) +
+    labs(x = "", y = "", fill = "割合(%)", title = paste0(current_mdc, "_", selected_operation, "(", selected_municipality, ")"), 
+         caption = "出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n『（２）MDC別医療機関別件数（割合）』をもとに作成\n市区町村単位で表示") +
+    theme(legend.position = "top",
+          text = element_text(family = font_sans),
+          plot.title = element_text(family = font_sans),
+          plot.caption = element_text(family = font_sans),
+          axis.text = element_text(family = font_sans))
+  
+  print(p)
+}
+```
+
+## 緊急入院・救急車による搬送の有無（MDC別）
+
+ここでは、緊急入院・救急車による搬送の有無の分析をしています。
+
+このグラフはMDC別に分析していますが、主要MDCや重点項目を中心に分析してください。
+
+これまでの予定外入院・救急医療入院・救急車による入院・がん関連に関しての分析をさらに詳細に分析したグラフとなっています。
+
+いままでの分析を振り返り多角的に分析してください。
+
+```{r}
+#| echo: false
+#| results: asis
+#| fig.height: 6
+#| fig.width: 10
+
+# Get MDC list for the main hospital
+DT <- setDT(copy(filter_by_prefecture(data2_2, params$prefecture)))
+MDC_selected <- unique(DT[施設名_最新 == selected_hospital_main, MDC])
+
+# Create individual graphs for each MDC
+for(selected_mdc in MDC_selected) {
+  cat("\n\n### ", selected_mdc, "\n\n")
+  
+  tryCatch({
+    # データの読み込みと前処理
+    data2_4_dt <- setDT(copy(filter_by_prefecture(data2_4, params$prefecture)))
+    data2_3_dt <- setDT(copy(filter_by_prefecture(data2_3, params$prefecture)))
+    
+    # MDCでフィルタリング
+    data2_4_dt <- data2_4_dt[MDC == selected_mdc]
+    data2_3_dt <- data2_3_dt[MDC == selected_mdc]
+    
+    if(nrow(data2_4_dt) > 0 || nrow(data2_3_dt) > 0) {
+      # 救急車搬送データの処理
+      if(nrow(data2_4_dt) > 0) {
+        setnames(data2_4_dt, "救急車による搬送", "value")
+        selected_cols <- c("市町村番号", "都道府県名", "市町村名", "施設名_最新", "lon", "lat", "年度", "施設名", "告示番号", "MDC", "value")
+        data2_4_processed <- data2_4_dt[, ..selected_cols][, name := "救急車による搬送"]
+      } else {
+        data2_4_processed <- NULL
+      }
+      
+      # データの結合
+      if(!is.null(data2_4_processed) && nrow(data2_3_dt) > 0) {
+        data2_3_4_join <- rbind(data2_3_dt, data2_4_processed)
+      } else if(!is.null(data2_4_processed)) {
+        data2_3_4_join <- data2_4_processed
+      } else if(nrow(data2_3_dt) > 0) {
+        data2_3_4_join <- data2_3_dt
+      } else {
+        cat("このMDCのデータは存在しません。\n")
+        next
+      }
+      
+      # キーの設定とデータ処理
+      setkey(data2_3_4_join, 市町村番号, 都道府県名, 市町村名, 施設名_最新, 年度)
+      data2_3_4_join[, total_value := sum(value, na.rm = TRUE), by = .(施設名_最新, 年度, MDC)]
+      data2_3_4_join[, proportion := value / total_value]
+      data2_3_4_join <- data2_3_4_join[年度 >= 2013]
+      
+      # 予定入院を除外し、NAを除去
+      data2_3_4_join <- data2_3_4_join[!is.na(proportion) & !is.na(年度) & name != "予定入院"]
+      
+      # nameカラムの値を確認し、必要に応じて設定
+      if(!"name" %in% names(data2_3_4_join) || all(is.na(data2_3_4_join$name))) {
+        data2_3_4_join[, name := "救急医療入院"]
+      }
+      
+      if(nrow(data2_3_4_join) > 0 && !all(is.na(data2_3_4_join$name))) {
+        # グラフの生成
+        p <- ggplot(data2_3_4_join, 
+                   aes(x = 年度, y = proportion, group = 施設名_最新, color = 施設名_最新)) +
+          geom_line(linewidth = 3) +
+          gghighlight(
+            施設名_最新 %in% highlight_hospitals,
+            use_direct_label = FALSE,
+            unhighlighted_params = list(linewidth = 0.5)
+          ) +
+          facet_wrap(~ name) +
+          theme_minimal(base_size = 12, base_family = font_sans) +
+          scale_x_continuous(breaks = seq(2013, max_year, by = 1)) +
+          scale_y_continuous(labels = scales::percent) +
+          labs(x = "", y = "割合", color = "", 
+               caption = paste0("出典: 厚生労働省DPC導入の影響評価に係る調査「退院患者調査」の結果報告\n",
+                              "『（３）予定・救急医療入院医療機関別MDC別集計, （４）救急車による搬送の有無の医療機関別MDC別集計』をもとに作成\n",
+                              "比較病院は同じ都道府県内の病院")) +
+          theme(legend.position = "top",
+                text = element_text(family = font_sans),
+                plot.title = element_text(family = font_sans),
+                plot.caption = element_text(family = font_sans),
+                axis.text = element_text(family = font_sans))
+        
+        print(p)
+      } else {
+        cat("このMDCの有効なデータが存在しないか、分類データがありません。\n")
+      }
+    } else {
+      cat("このMDCのデータは存在しません。\n")
+    }
+  }, error = function(e) {
+    cat(sprintf("\nエラーが発生しました（%s）: %s\n次のMDCの処理に進みます。\n", selected_mdc, e$message))
+  })
+}
+```
+
+## 手術別MDC（主病院）
+
+ここは病名の重点項目それぞれの詳しい解析となっています。
+
+最新5年のデータを表示しています。
+
+重点項目の病名を中心に時系列の変化を分析してください。
+
+また過去は割合が高かったのに今は低いというような変化があるかもしれません。
+
+そのような変化があるかどうかを分析してください。
+
+```{r}
+#| echo: false
+#| fig.height: 8
+#| fig.width: 10
+#| results: asis
+
+# データの読み込み
+DT_data2_8 <- setDT(copy(filter_by_prefecture(data2_8, params$prefecture)))
+
+# 利用可能な年度を取得し、最新5年度を選択
+available_years <- sort(unique(DT_data2_8$年度), decreasing = TRUE)[1:5]
+operation_types <- c("手術あり", "手術なし", "合計")
+
+# 各年度と手術タイプの組み合わせでグラフを生成
+for(current_year in available_years) {
+  for(current_operation in operation_types) {
+    cat(sprintf("\n\n### %s年度 - %s\n\n", current_year, current_operation))
+    
+    # データのフィルタリングと処理
+    plot_data <- DT_data2_8[年度 == current_year & 
+                           施設名_最新 %in% c(selected_hospital_main)]
+    
+    if(nrow(plot_data) > 0) {
+      # データ処理の状態を確認
+      print(sprintf("Processing data for year %s and operation type %s", 
+                   current_year, current_operation))
+      print(sprintf("Initial row count: %d", nrow(plot_data)))
+      
+      # 手術タイプによるフィルタリング
+      plot_data <- plot_data[get(current_operation) > 0]
+      print(sprintf("Row count after filtering: %d", nrow(plot_data)))
+      
+      if(nrow(plot_data) > 0) {
+        plot_data <- plot_data[order(-get(current_operation))]
+        plot_data[, `:=`(
+          percentage = get(current_operation)/sum(get(current_operation)),
+          group_size = 1:.N
+        )]
+        plot_data[, cumsum_percentage := cumsum(percentage)]
+        plot_data <- plot_data[group_size <= 20]
+        
+        if(nrow(plot_data) > 0) {
+          print(sprintf("Final row count for plotting: %d", nrow(plot_data)))
+          
+          # グラフの生成
+          p <- ggplot(plot_data, 
+                     aes(x = reorder(paste0(病名, " (", MDC_main, ")"), 
+                                   desc(cumsum_percentage)))) +
+            geom_bar(aes(y = percentage, fill = MDC_main), stat = "identity") +
+            geom_line(aes(y = cumsum_percentage), linewidth = 3, color = "red") +
+            geom_text(aes(label = get(current_operation), y = percentage), 
+                     size = 3, hjust = -0.5, family = font_sans) +
+            theme_minimal(base_size = 10, base_family = font_sans) +
+            scale_y_continuous(labels = scales::percent) +
+            labs(x = "", y = "", 
+                 title = paste0(selected_hospital_main, 
+                              " - 主要疾患 (", current_year, "年) - ",
+                              current_operation),
+                 caption = paste0("出典: 厚生労働省DPC導入の影響評価に係る調査",
+                                "「退院患者調査」の結果報告\n",
+                                "『（８）疾患別手術別集計』をもとに作成\n",
+                                "上位20位までを表示している")) +
+            coord_flip()
+          
+          print(p)
+        } else {
+          cat("データが存在しないため、グラフを生成できません。\n")
+        }
+      } else {
+        cat("フィルタリング後のデータが存在しません。\n")
+      }
+    } else {
+      cat("指定された年度・病院のデータが存在しません。\n")
+    }
+  }
+}
+```
+
+## 病名別 エリア分析
+
+ここは病名の重点項目それぞれの詳しい解析となっています。
+
+それぞれの病名の市区町村別の割合を表示しています。
+
+ただしかなり煩雑なデータなので、ハルシネーションが起きやすいデータでもあります。
+
+重点項目の病名を中心に参考程度に分析してください。
+
+```{r}
+#| echo: false
+#| results: asis
+#| fig.height: 6
+#| fig.width: 10
+
+# データの読み込みと初期フィルタリング
+DT_data2_8 <- setDT(copy(filter_by_prefecture(data2_8, params$prefecture)))
+
+# 選択された病院に存在するMDCのみを取得
+operation_types <- c("合計", "手術あり", "手術なし")
+
+# データの状態を確認
+print("Initial data summary:")
+print(sprintf("Number of rows: %d", nrow(DT_data2_8)))
+print("Operation types:")
+print(operation_types)
+
+# 各手術タイプでtop20の病名を取得し、それぞれの病名について市区町村別グラフを生成
+for(current_operation in operation_types) {
+  cat(sprintf("\n\n## %s の Top 20 疾患\n\n", current_operation))
+  
+  # Top20の病名を取得
+  top20_diseases <- DT_data2_8[
+    施設名_最新 == selected_hospital_main & 
+    get(current_operation) > 0
+  ][
+    order(-get(current_operation))
+  ][
+    1:min(20, .N)
+  ]$病名
+  
+  # 各病名についてグラフを生成
+  for(current_disease in top20_diseases) {
+    cat(sprintf("\n\n### %s\n\n", current_disease))
+    
+    tryCatch({
+      # データのフィルタリングと処理
+      plot_data <- DT_data2_8[
+        病名 == current_disease
+      ]
+      
+      if(nrow(plot_data) > 0) {
+        # データ処理の状態を確認
+        print(sprintf("Processing data for disease %s with operation type %s", 
+                     current_disease, current_operation))
+        print(sprintf("Initial row count: %d", nrow(plot_data)))
+        
+        # 手術タイプによる値の設定
+        plot_data[, value := get(current_operation)]
+        plot_data <- plot_data[value > 0]
+        
+        if(nrow(plot_data) > 0) {
+          # 市町村別の割合を計算
+          plot_data[, 年度別割合 := value / sum(value), by = 年度]
+          
+          if(nrow(plot_data) > 0) {
+            print(sprintf("Final row count for plotting: %d", nrow(plot_data)))
+            
+            # グラフの生成
+            p <- ggplot(plot_data, 
+                       aes(x = 年度, y = 施設名_最新)) +
+              geom_tile(aes(fill = 年度別割合 * 100)) +
+              geom_text(aes(label = sprintf("%d件\n%.1f%%", 
+                                          value, 
+                                          年度別割合 * 100)),
+                       family = font_sans) +
+              scale_fill_gradient(low = "white", high = "red") +
+              theme_minimal(base_size = 10, base_family = font_sans) +
+              labs(x = "", y = "", 
+                   fill = "割合(%)",
+                   title = paste0(current_disease, " - ", current_operation,
+                                "\n", selected_hospital_main),
+                   caption = paste0("出典: 厚生労働省DPC導入の影響評価に係る調査",
+                                  "「退院患者調査」の結果報告\n",
+                                  "『（８）疾患別手術別集計』をもとに作成")) +
+              theme(legend.position = "top",
+                    text = element_text(family = font_sans),
+                    plot.title = element_text(family = font_sans),
+                    plot.caption = element_text(family = font_sans),
+                    axis.text = element_text(family = font_sans))
+            
+            print(p)
+          } else {
+            cat("年度別割合の計算後にデータが存在しないため、グラフを生成できません。\n")
+          }
+        } else {
+          cat("フィルタリング後のデータが存在しません。\n")
+        }
+      } else {
+        cat("指定された病名のデータが存在しません。\n")
+      }
+    }, error = function(e) {
+      cat(sprintf("\nエラーが発生しました（%s）: %s\n次の病名の処理に進みます。\n", 
+                  current_disease, e$message))
+    })
+  }
+}
+```
+
+## 病名別 エリア分析（Top20）
+
+ここは病名の重点項目それぞれの詳しい解析となっています。
+
+主要MDCや重点項目を中心に分析してください。
+
+注意点として、このグラフは市区町村別の％となっています。
+
+そのため％は二次医療圏での割合ではないため、あくまでも市町村単位での分析に使用してください。
+
+ただし、実数の増減は今回の市町村以外の影響も受ける可能性があるので、実数の分析は二次医療圏の別の市町村が増減すれば変化する可能性があることに留意して分析してください。
+
+実際に他の市区町村の数値はないため、ここだけで結論つけられないですが、主病院の各MDCが時系列で何が増えて減っているのか？という分析に関してはグラフから読み取ることが可能です。
+
+```{r}
+#| echo: false
+#| results: asis
+#| fig.height: 12
+#| fig.width: 10
+
+# データの読み込みと初期フィルタリング
+DT_data2_8 <- setDT(copy(filter_by_prefecture(data2_8, params$prefecture)))
+operation_types <- c("合計", "手術あり", "手術なし")
+
+# 各手術タイプでtop20の病名を取得し、それぞれの病名について市区町村別グラフを生成
+for(current_operation in operation_types) {
+  cat(sprintf("\n\n## %s の Top 20 疾患の市区町村別分析\n\n", current_operation))
+  
+  # Top20の病名を取得
+  top20_diseases <- DT_data2_8[
+    施設名_最新 == selected_hospital_main & 
+    get(current_operation) > 0
+  ][
+    order(-get(current_operation))
+  ][
+    1:min(20, .N)
+  ]$病名
+  
+  # 各病名についてグラフを生成
+  for(current_disease in top20_diseases) {
+    cat(sprintf("\n\n### %s\n\n", current_disease))
+    
+    tryCatch({
+      # データのフィルタリングと処理
+      plot_data <- DT_data2_8[
+        病名 == current_disease &
+        市町村名 == selected_municipality
+      ]
+      
+      if(nrow(plot_data) > 0) {
+        # 手術タイプによる値の設定
+        plot_data[, value := get(current_operation)]
+        plot_data <- plot_data[value > 0]
+        
+        if(nrow(plot_data) > 0) {
+          # 市町村別の割合を計算
+          plot_data[, 年度別割合 := value / sum(value), by = 年度]
+          
+          if(nrow(plot_data) > 0) {
+            # グラフの生成
+            p <- ggplot(plot_data, 
+                       aes(x = 年度, y = 施設名_最新)) +
+              geom_tile(aes(fill = 年度別割合 * 100)) +
+              geom_text(aes(label = sprintf("%d件\n%.1f%%", 
+                                          value, 
+                                          年度別割合 * 100)),
+                       family = font_sans) +
+              scale_fill_gradient(low = "white", high = "red") +
+              theme_minimal(base_size = 10, base_family = font_sans) +
+              labs(x = "", y = "", 
+                   fill = "割合(%)",
+                   title = paste0(current_disease, " - ", current_operation,
+                                "\n", selected_municipality),
+                   caption = paste0("出典: 厚生労働省DPC導入の影響評価に係る調査",
+                                  "「退院患者調査」の結果報告\n",
+                                  "『（８）疾患別手術別集計』をもとに作成\n",
+                                  "市区町村単位で表示")) +
+              theme(legend.position = "top",
+                    text = element_text(family = font_sans),
+                    plot.title = element_text(family = font_sans),
+                    plot.caption = element_text(family = font_sans),
+                    axis.text = element_text(family = font_sans))
+            
+            print(p)
+          } else {
+            cat(sprintf("この病名の %s のデータは存在しません。\n", selected_municipality))
+          }
+        } else {
+          cat(sprintf("この病名の %s のデータは存在しません。\n", selected_municipality))
+        }
+      } else {
+        cat(sprintf("この病名の %s のデータは存在しません。\n", selected_municipality))
+      }
+    }, error = function(e) {
+      cat(sprintf("\nエラーが発生しました（%s）: %s\n次の病名の処理に進みます。\n", 
+                  current_disease, e$message))
+    })
+  }
+}
+```
+
+# まとめ
+
+最後に、ここまでの分析をまとめてください。
+
+このファイルは「DPC導入の影響評価に係る調査「退院患者調査」の結果報告」の2012年度からの経時変化を示したグラフがたくさんあります。分析の目標は知らない人に主病院はなにが強い病院なのか？を医業経営コンサルタントとして伝えることです。たくさんあるグラフを結果を多角的に分析して、医業経営コンサルタントが初手で分析する時のポイントを伝えるためにこのGPTsを作成しています。
+
+ここに表示されている主病院がどのような特徴があるのか、この10年でなにが起きているのかを読み取ったグラフの結果をベースに分析してください。
+
+最終的には主病院は手術あり・なし合計で何に強いのか？地域のシェアや役割は何か（急性期のように受ける病院、急性期から受ける病院、こういった手術が多い病院など）を入退院経路などを含めて分析してください。そして、この10年で強みは維持できているのかどうか、新しい強みが出現していないかどうかも分析してください。
+
+医業経営コンサルタントがこのレポートを読んで感動させてください。ただし感動は確率的に出力される事実ではない予測で感動するのではありません。ハルシネーションを起こさず事実ベースによる鋭い洞察を出すことで感動させてください。

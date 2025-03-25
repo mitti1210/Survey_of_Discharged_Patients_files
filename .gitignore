@@ -1,0 +1,12 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+/.quarto/
+rsconnect
+test.r
+renv.lock
+renv
+Survey_of_Discharged_Patients.Rproj
+.DS_Store
+.Rprofile
