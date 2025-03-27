@@ -20,6 +20,7 @@ resource_files:
 ```{r}
 #| context: setup
 library(shiny)
+library(shinydashboard)
 library(data.table)
 library(tidyverse)
 library(tidylog)
@@ -820,9 +821,53 @@ output$plot_data2_2_municipalities <- renderPlot({
     theme(legend.position = "top")
 })
 
+output$plot_data2_2_text <- renderTable({
+  req(input$dynamicMunicipality, input$mdc_selector, input$prefecture)
 
+  selected_prefecture <- input$prefecture
+  selected_hospital_main <- input$dynamicHospital_main
+  current_year_for_text <- max_year
+  operation_types_for_text <- c("手術あり", "手術なし", "合計")
 
+  DT_data2_8 <- setDT(copy(data_list_filtered()[["data2_8"]]))
+  
+  # Create empty list to store data frames for each operation type
+  table_list <- list()
+  
+  for(current_operation in operation_types_for_text) {
+    plot_data_text <- DT_data2_8[年度 == current_year_for_text & 施設名_最新 == selected_hospital_main]
 
+    if(nrow(plot_data_text) > 0) {
+      plot_data_text <- plot_data_text[get(current_operation) > 0]
+      if(nrow(plot_data_text) > 0) {
+        # Sort by current operation type and add rank within operation type
+        plot_data_text <- plot_data_text[order(-get(current_operation))]
+        top_n <- min(10, nrow(plot_data_text))
+        plot_data_text <- head(plot_data_text, top_n)
+        
+        if(nrow(plot_data_text) > 0) {
+          # Create data frame for current operation type with rank
+          df <- data.frame(
+            手術区分 = current_operation,
+            順位 = seq_len(nrow(plot_data_text)),  # Rank resets for each operation type
+            病名 = plot_data_text$病名,
+            MDC = plot_data_text$MDC_main,
+            病名 = plot_data_text$病名
+          )
+          table_list[[current_operation]] <- df
+        }
+      }
+    }
+  }
+  
+  # Combine all data frames
+  do.call(rbind, table_list)
+}, 
+striped = TRUE,
+hover = TRUE,
+spacing = "s",
+align = "c",
+digits = 0)
 
 
 
@@ -832,17 +877,22 @@ output$plot_data2_2_municipalities <- renderPlot({
 
 # 基本情報
 
-## Row {height="20%"}
-
-:::{.card title = "主病院"}
+## Row {.tabset}
 
 ```{r}
-textOutput("main_hospital_text")
+#| title: 主要MDC
+plotOutput("plot_data1_12")
 ```
 
-:::
+```{r}
+#| title: 主要MDC(手術別)
+plotOutput("plot_data2_2")
+```
 
-## Row {.tabset}
+```{r} 
+#| title: 主要病名
+tableOutput("plot_data2_2_text")
+```
 
 ```{r}
 #| title: 平均在院日数
@@ -865,18 +915,13 @@ plotOutput("plot_data1_8_patchwork")
 ```
 
 ```{r}
-#| title: 退院時転帰
-plotOutput("plot_data1_9")
-```
-
-```{r}
 #| title: 再入院
 plotOutput("plot_data1_10")
 ```
 
 ```{r}
-#| title: 主要MDC
-plotOutput("plot_data1_12")
+#| title: 退院時転帰
+plotOutput("plot_data1_9")
 ```
 
 ```{r}
@@ -884,14 +929,14 @@ plotOutput("plot_data1_12")
 plotOutput("plot_data1_14")
 ```
 
+
+
+
 # MDC分析
 
 ## Row {.tabset}
 
-```{r}
-#| title: 手術別MDC
-plotOutput("plot_data2_2")
-```
+
 
 ```{r}
 #| title: 手術別MDC(市区町村)
@@ -904,7 +949,7 @@ plotOutput("plot_data2_3_4")
 ```
 
 ```{r}
-#| title: 手術別MDC(主病院)
+#| title: 主要MDC
 plotOutput("plot_data2_8_main_hospital")
 ```
 

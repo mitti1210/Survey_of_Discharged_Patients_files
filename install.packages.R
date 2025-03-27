@@ -14,6 +14,6 @@ renv::install("geosphere")
 renv::install("quarto")
 renv::install("here")
 renv::install("rsconnect")
+renv::install("shinydashboard")
+renv::install("httpgd")
 
-
-rsconnect::writeManifest()

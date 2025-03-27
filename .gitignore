@@ -5,10 +5,7 @@
 /.quarto/
 rsconnect
 test.r
-renv.lock
-renv
-Survey_of_Discharged_Patients.Rproj
 .DS_Store
 .Rprofile
 _quarto.yml
-app.R
+Survey_of_Discharged_Patients.Rproj
