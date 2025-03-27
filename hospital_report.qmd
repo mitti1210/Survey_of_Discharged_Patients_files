@@ -90,26 +90,25 @@ theme_update(
 )
 
 # Load necessary data
-hospital_overview_long <- readRDS("rds/hospital_overview_long.rds")
+hospital_overview_long <- readRDS(here("rds", "hospital_overview_long.rds"))
 setDT(hospital_overview_long)
 
-disease_list <- readRDS("rds/disease_list.rds")
+disease_list <- readRDS(here("rds", "disease_list.rds"))
 
 # Load individual RDS files
-data1_3 <- readRDS("data/rds/data1_3.rds")
-data1_6 <- readRDS("data/rds/data1_6.rds")
-data1_7 <- readRDS("data/rds/data1_7.rds")
-data1_8_hospitalization <- readRDS("data/rds/data1_8_hospitalization.rds")
-data1_8_discharge <- readRDS("data/rds/data1_8_discharge.rds")
-data1_9 <- readRDS("data/rds/data1_9.rds")
-data1_10 <- readRDS("data/rds/data1_10.rds")
-data1_12 <- readRDS("data/rds/data1_12.rds")
-data1_14 <- readRDS("data/rds/data1_14.rds")
-data2_2 <- readRDS("data/rds/data2_2.rds")
-data2_3 <- readRDS("data/rds/data2_3.rds")
-data2_4 <- readRDS("data/rds/data2_4.rds")
-data2_8 <- readRDS("data/rds/data2_8.rds")
-
+data1_3 <- readRDS(here("data", "rds", "data1_3.rds"))
+data1_6 <- readRDS(here("data", "rds", "data1_6.rds"))
+data1_7 <- readRDS(here("data", "rds", "data1_7.rds"))
+data1_8_hospitalization <- readRDS(here("data", "rds", "data1_8_hospitalization.rds"))
+data1_8_discharge <- readRDS(here("data", "rds", "data1_8_discharge.rds"))
+data1_9 <- readRDS(here("data", "rds", "data1_9.rds"))
+data1_10 <- readRDS(here("data", "rds", "data1_10.rds"))
+data1_12 <- readRDS(here("data", "rds", "data1_12.rds"))
+data1_14 <- readRDS(here("data", "rds", "data1_14.rds"))
+data2_2 <- readRDS(here("data", "rds", "data2_2.rds"))
+data2_3 <- readRDS(here("data", "rds", "data2_3.rds"))
+data2_4 <- readRDS(here("data", "rds", "data2_4.rds"))
+data2_8 <- readRDS(here("data", "rds", "data2_8.rds"))
 
 # Convert to data.tables
 setDT(data1_3)
@@ -133,10 +132,10 @@ max_year <- max(data1_3$年度, na.rm = TRUE)
 
 
 
-prefectures <- readRDS("rds/prefectures.rds")
-municipalities <- readRDS("rds/municipalities.rds")
-hospitals <- readRDS("rds/hospitals.rds")
-hospitals_municipalities <- readRDS("rds/hospitals_municipalities.rds")
+prefectures <- readRDS(here("rds", "prefectures.rds"))
+municipalities <- readRDS(here("rds", "municipalities.rds"))
+hospitals <- readRDS(here("rds", "hospitals.rds"))
+hospitals_municipalities <- readRDS(here("rds", "hospitals_municipalities.rds"))
 
 # Filter function for prefecture
 filter_by_prefecture <- function(dt, prefecture) {
