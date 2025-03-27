@@ -10,6 +10,14 @@ library(ggrepel)
 library(patchwork)
 library(here)
 
+# フォント設定をグローバルに設定 (hospital_report.qmd から移植)
+font_sans <- switch(Sys.info()["sysname"],
+                   "Windows" = "Yu Gothic",
+                   "Darwin"  = "Hiragino Sans",
+                   "Noto Sans CJK JP")
+theme_set(theme_minimal(base_size = 16, base_family = font_sans))
+
+
 # Load data
 hospital_overview_long <- readRDS(here("rds", "hospital_overview_long.rds"))
 setDT(hospital_overview_long)
@@ -169,20 +177,30 @@ server <- function(input, output, session) {
   
   # Create a reactive expression for filtered data_list
   data_list_filtered <- reactive({
-    lapply(data_list, function(dt) {
+    filtered_data_list <- list()
+    selected_prefecture <- input$prefecture
+    for (name in names(data_list)) {
+      dt <- data_list[[name]]
       if ("都道府県名" %in% names(dt)) {
-        dt <- dt[都道府県名 == input$prefecture]
+        filtered_data_list[[name]] <- dt[都道府県名 == selected_prefecture] # data.table フィルタリング
+      } else {
+        filtered_data_list[[name]] <- dt # フィルタリングしないデータ
       }
-      return(dt)
-    })
+    }
+    return(filtered_data_list)
   })
   
   # Plot outputs
   output$plot_data1_12 <- renderPlot({
     req(input$dynamicHospital_main)
     
+    plot_data_subject_all <- readRDS("data/rds/data1_12.rds")
+    setDT(plot_data_subject_all)
+    
     plot_data <- data_list_filtered()[["data1_12"]]
-    if(is.null(plot_data)) return(NULL)
+    if(is.null(plot_data)) {
+      plot_data <- plot_data_subject_all
+    }
     
     highlight_hospitals <- input$dynamicHospital_main
     if (!is.null(input$dynamicHospital_comparison) && length(input$dynamicHospital_comparison) > 0) {
@@ -218,8 +236,14 @@ server <- function(input, output, session) {
   output$plot_data1_3 <- renderPlot({
     req(input$dynamicHospital_main)
     
+    # data1_3.rds をここで読み込む
+    plot_data_all <- readRDS("data/rds/data1_3.rds")
+    setDT(plot_data_all)
+
     plot_data <- data_list_filtered()[["data1_3"]]
-    if(is.null(plot_data)) return(NULL)
+    if(is.null(plot_data)) {
+      plot_data <- plot_data_all # フィルター前のデータを使用
+    }
     
     highlight_hospitals <- input$dynamicHospital_main
     if (!is.null(input$dynamicHospital_comparison) && length(input$dynamicHospital_comparison) > 0) {
