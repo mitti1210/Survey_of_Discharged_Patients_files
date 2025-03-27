@@ -10,21 +10,21 @@ library(patchwork)
 library(here)
 
 # Load data
-hospital_overview_long <- readRDS(here("rds", "hospital_overview_long.rds"))
+hospital_overview_long <- readRDS("rds/hospital_overview_long.rds")
 setDT(hospital_overview_long)
 
-disease_list <- readRDS(here("rds", "disease_list.rds"))
+disease_list <- readRDS("rds/disease_list.rds")
 
 min_year <- min(hospital_overview_long$年度, na.rm = TRUE)
 max_year <- max(hospital_overview_long$年度, na.rm = TRUE)  
 
-prefectures <- readRDS(here("rds", "prefectures.rds"))
-municipalities <- readRDS(here("rds", "municipalities.rds"))
-hospitals <- readRDS(here("rds", "hospitals.rds"))
-hospitals_municipalities <- readRDS(here("rds", "hospitals_municipalities.rds"))
+prefectures <- readRDS("rds/prefectures.rds")
+municipalities <- readRDS("rds/municipalities.rds")
+hospitals <- readRDS("rds/hospitals.rds")
+hospitals_municipalities <- readRDS("rds/hospitals_municipalities.rds")
 
 # Load RDS files
-rds_files <- list.files(path = here("data", "rds"), pattern = "\\.rds$", full.names = TRUE)
+rds_files <- list.files(path = "data/rds", pattern = "\\.rds$", full.names = TRUE)
 
 # Read all RDS files into a list and convert to data.tables
 data_list <- lapply(rds_files, function(x) {
