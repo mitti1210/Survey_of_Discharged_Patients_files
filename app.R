@@ -18,14 +18,13 @@ font_sans <- switch(Sys.info()["sysname"],
 theme_set(theme_minimal(base_size = 16, base_family = font_sans))
 
 
-# Load data
+# Load data (必要最低限のデータのみ読み込み)
 hospital_overview_long <- readRDS(here("rds", "hospital_overview_long.rds"))
 setDT(hospital_overview_long)
 
-disease_list <- readRDS(here("rds", "disease_list.rds"))
 
 min_year <- min(hospital_overview_long$年度, na.rm = TRUE)
-max_year <- max(hospital_overview_long$年度, na.rm = TRUE)  
+max_year <- max(hospital_overview_long$年度, na.rm = TRUE)
 
 prefectures <- readRDS(here("rds", "prefectures.rds"))
 municipalities <- readRDS(here("rds", "municipalities.rds"))
@@ -33,15 +32,18 @@ hospitals <- readRDS(here("rds", "hospitals.rds"))
 hospitals_municipalities <- readRDS(here("rds", "hospitals_municipalities.rds"))
 
 # Load RDS files
-rds_files <- list.files(path = here("data", "rds"), pattern = "\\.rds$", full.names = TRUE)
+#rds_files <- list.files(path = here("data", "rds"), pattern = "\\.rds$", full.names = TRUE)
 
 # Read all RDS files into a list and convert to data.tables
-data_list <- lapply(rds_files, function(x) {
-  dt <- setDT(readRDS(x))
-  name <- gsub("\\.rds$", "", basename(x))  # Extract filename without extension
-  return(dt)
-})
-names(data_list) <- gsub("\\.rds$", "", basename(rds_files)) # Assign names to list elements
+#data_list <- lapply(rds_files, function(x) {
+#  dt <- setDT(readRDS(x))
+#  name <- gsub("\\.rds$", "", basename(x))  # Extract filename without extension
+#  return(dt)
+#})
+#names(data_list) <- gsub("\\.rds$", "", basename(rds_files)) # Assign names to list elements
+
+# Initialize empty data_list
+data_list <- list()
 
 
 
@@ -194,18 +196,17 @@ server <- function(input, output, session) {
   output$plot_data1_12 <- renderPlot({
     req(input$dynamicHospital_main)
     
-    plot_data_subject_all <- readRDS("data/rds/data1_12.rds")
+    # 必要なデータのみを読み込む
+    plot_data_subject_all <- readRDS(here("data", "rds", "data1_12.rds"))
     setDT(plot_data_subject_all)
-    
-    plot_data <- data_list_filtered()[["data1_12"]]
-    if(is.null(plot_data)) {
-      plot_data <- plot_data_subject_all
-    }
     
     highlight_hospitals <- input$dynamicHospital_main
     if (!is.null(input$dynamicHospital_comparison) && length(input$dynamicHospital_comparison) > 0) {
       highlight_hospitals <- c(input$dynamicHospital_main, input$dynamicHospital_comparison)
     }
+    
+    # 都道府県でフィルタリング
+    plot_data <- plot_data_subject_all[都道府県名 == input$prefecture]
     
     plot_data |>
       filter(施設名_最新 %in% highlight_hospitals) |>
@@ -221,8 +222,8 @@ server <- function(input, output, session) {
                 position = position_stack(vjust = 0.5, reverse = TRUE), 
                 color = "grey20") +
       geom_text_repel(aes(x = 年度 + 1, label = label_MDC), 
-                      position = position_stack(vjust = 0.5, reverse = TRUE), 
-                      color = "grey20", direction = "y") +
+                    position = position_stack(vjust = 0.5, reverse = TRUE), 
+                    color = "grey20", direction = "y") +
       facet_wrap(~ 施設名_最新) +
       theme_minimal() +
       scale_x_continuous(breaks = seq(min_year, max_year, by = 1)) +
